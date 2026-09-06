@@ -115,6 +115,36 @@ trading some mesh detail for an actual time ceiling instead of an average.
 Watch the real `shape_seconds`/`texture_seconds` numbers on deploy and tune
 from there -- these are informed estimates, not guaranteed timings.
 
+## Shape checkpoint: anatomy over raw speed
+
+Confirmed live: the 0.6B `hunyuan3d-dit-v2-mini-turbo` checkpoint (the
+first candidate `_load_shape_pipeline()` tried, chosen purely for speed)
+generated a cat with a head as big as its body and legs in the wrong
+place -- a real proportion/anatomy failure, not a step-count artifact
+(already running 25 steps). Swapped the candidate order to try the full
+1.1B `hunyuan3d-dit-v2-0-turbo` checkpoint first instead -- same "turbo"
+few-step distillation family, so it's roughly 2x `shape_seconds` (measured
+~8s -> expect ~16s), not a speed cliff, and comfortably inside the ~30s
+budget. Falls back to mini-turbo only if the bigger checkpoint is missing.
+
+## Content safety
+
+Two layers, since a keyword filter on the prompt text can't do anything
+about the `image_b64` path -- a user can upload inappropriate content
+directly with no prompt involved at all.
+
+1. `_prompt_is_flagged()` -- a zero-cost keyword check on the prompt text,
+   rejects obvious intent immediately via HTTP 400 in `/generate` before
+   any GPU time is spent. Cheap first layer, not the real backstop.
+2. `_check_image_safety()` -- runs `Falconsai/nsfw_image_detection` (a
+   small self-hosted ViT classifier, already covered by the existing
+   `transformers` dependency, no external API key needed) on the actual
+   image -- uploaded OR generated -- before shape generation. This is what
+   actually matters: it catches inappropriate uploaded images regardless
+   of prompt, and catches a generated image even if a prompt slipped past
+   the keyword filter. Flagged requests fail with a clear error in
+   `/status` instead of proceeding.
+
 ## Getting the image built
 
 Push to `main` and the GitHub Actions workflow builds + pushes it

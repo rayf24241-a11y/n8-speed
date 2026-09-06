@@ -51,6 +51,42 @@ from hy3dgen.rembg import BackgroundRemover  # noqa: E402
 # needs an image where the background is already gone.
 rmbg = BackgroundRemover()
 
+print("Loading content-safety classifier...", flush=True)
+from transformers import pipeline as hf_pipeline  # noqa: E402
+
+# A keyword check on the prompt text alone can't cover the /image_b64
+# path at all -- a user can just upload inappropriate content directly,
+# no prompt involved. This classifies the actual image (uploaded OR
+# generated) before any GPU time is spent on the 3D pipeline. Small ViT
+# model, self-hosted like everything else here (no external API key),
+# negligible added VRAM/latency on top of what's already loaded.
+nsfw_classifier = hf_pipeline("image-classification", model="Falconsai/nsfw_image_detection", device=0)
+NSFW_CONFIDENCE_THRESHOLD = 0.85
+
+
+def _check_image_safety(image: Image.Image):
+    result = max(nsfw_classifier(image), key=lambda r: r["score"])
+    if result["label"] == "nsfw" and result["score"] >= NSFW_CONFIDENCE_THRESHOLD:
+        raise ValueError("Image flagged as inappropriate -- request rejected.")
+
+
+# First-pass, zero-GPU-cost filter on the prompt text itself -- rejects
+# obvious intent immediately via HTTP 400 instead of queuing a job that
+# would just get caught downstream anyway. This is a cheap first layer,
+# not the real backstop: _check_image_safety() above is what actually
+# covers uploaded images, which this can't touch at all.
+BANNED_PROMPT_TERMS = (
+    "nude", "naked", "nsfw", "porn", "sexual", "genitals", "genitalia",
+    "penis", "vagina", "breasts", "nipple", "loli", "shota",
+    "bestiality", "gore", "decapitat", "mutilat", "corpse", "dead body",
+)
+
+
+def _prompt_is_flagged(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return any(term in lowered for term in BANNED_PROMPT_TERMS)
+
+
 # Confirmed live: a plain prompt like "a dog" makes SDXL-Turbo generate a
 # natural photo -- dog standing on visible ground/floor, background context,
 # shadow -- and the shape pipeline then reconstructs 3D geometry for
@@ -66,16 +102,24 @@ TEXT_TO_IMAGE_STYLE_SUFFIX = (
 
 def _load_shape_pipeline():
     """
-    Try the fastest checkpoint first, fall back to slower-but-known-good ones.
-    The exact subfolder name for the mini-turbo checkpoint can shift between
-    Hunyuan3D-2 releases -- this fallback chain means a rename upstream
-    degrades speed instead of hard-crashing the server.
+    Try the best-quality checkpoint we have time budget for first, fall back
+    to smaller/older ones if it's missing. The exact subfolder name can
+    shift between Hunyuan3D-2 releases -- this fallback chain means a
+    rename upstream degrades quality instead of hard-crashing the server.
     """
     from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
     candidates = [
-        ("tencent/Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini-turbo"),
+        # Confirmed live: the 0.6B mini-turbo checkpoint (previously first
+        # here, chosen purely for speed) produced a cat with a head as big
+        # as its body and misplaced legs -- a real anatomy/proportion
+        # failure, not a step-count artifact (already at 25 steps). The
+        # full 1.1B turbo checkpoint is a materially bigger model with the
+        # same "turbo" few-step distillation, so it's not a speed cliff --
+        # only ~2x shape_seconds (measured ~8s -> expect ~16s), comfortably
+        # inside the ~30s budget, for meaningfully better anatomy.
         ("tencent/Hunyuan3D-2", "hunyuan3d-dit-v2-0-turbo"),
+        ("tencent/Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini-turbo"),
         ("tencent/Hunyuan3D-2", "hunyuan3d-dit-v2-0"),
     ]
     last_err = None
@@ -164,6 +208,11 @@ def _run_job(job_id: str):
         image_seconds = time.time() - t_img
     else:
         raise ValueError("Provide either 'prompt' or 'image_b64'")
+
+    # Covers both paths -- an uploaded image never went through the prompt
+    # keyword filter in /generate at all, and a text prompt that dodges
+    # that filter still has to produce an actual image, which lands here.
+    _check_image_safety(image)
 
     # Confirmed against Hunyuan3D-2's own gradio_app.py: it runs every RGB
     # image through background removal before shape generation, unconditionally.
@@ -290,6 +339,8 @@ threading.Thread(target=worker_loop, daemon=True).start()
 def generate(req: GenerateRequest):
     if not req.prompt and not req.image_b64:
         raise HTTPException(400, "Provide 'prompt' or 'image_b64'")
+    if req.prompt and _prompt_is_flagged(req.prompt):
+        raise HTTPException(400, "Prompt rejected: inappropriate content is not allowed.")
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
