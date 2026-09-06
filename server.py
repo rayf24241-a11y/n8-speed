@@ -72,13 +72,19 @@ def _check_image_safety(image: Image.Image):
 
 # First-pass, zero-GPU-cost filter on the prompt text itself -- rejects
 # obvious intent immediately via HTTP 400 instead of queuing a job that
-# would just get caught downstream anyway. This is a cheap first layer,
-# not the real backstop: _check_image_safety() above is what actually
-# covers uploaded images, which this can't touch at all.
+# would just get caught downstream anyway. Confirmed live: this needs
+# named-object terms too, not just anatomy/act words -- a prompt asking
+# for a sex toy by name generates an image of exactly that object on a
+# plain background, which isn't nudity and isn't guaranteed to trip an
+# NSFW-photo classifier trained mainly on explicit imagery. The keyword
+# list is the actual defense for this category; _check_image_safety()
+# below is a backstop for nudity-style content, not a substitute for it.
 BANNED_PROMPT_TERMS = (
     "nude", "naked", "nsfw", "porn", "sexual", "genitals", "genitalia",
     "penis", "vagina", "breasts", "nipple", "loli", "shota",
     "bestiality", "gore", "decapitat", "mutilat", "corpse", "dead body",
+    "dildo", "vibrator", "sex toy", "fleshlight", "buttplug", "butt plug",
+    "strap-on", "strap on", "cock ring", "anal plug",
 )
 
 
