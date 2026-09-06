@@ -13,6 +13,7 @@ import io
 import queue
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -103,7 +104,11 @@ def _run_job(job_id: str):
         raise ValueError("Provide either 'prompt' or 'image_b64'")
 
     t0 = time.time()
-    mesh = shape_pipeline(image=image)[0]
+    # Hunyuan3DDiTFlowMatchingPipeline defaults to num_inference_steps=50 --
+    # fine for the base checkpoint, but defeats the whole point of the
+    # mini-turbo checkpoint (few-step distilled, designed for ~5 steps).
+    # Starting guess; tune against the real shape_seconds this logs.
+    mesh = shape_pipeline(image=image, num_inference_steps=5)[0]
     shape_seconds = time.time() - t0
 
     texture_seconds = 0.0
@@ -130,6 +135,7 @@ def worker_loop():
         try:
             _run_job(job_id)
         except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
             with jobs_lock:
                 jobs[job_id]["status"] = "error"
                 jobs[job_id]["error"] = str(e)
