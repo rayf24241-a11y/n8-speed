@@ -58,27 +58,50 @@ the Hunyuan3D-2 README pattern from memory. If the container throws on the
 first `/generate` call, the pod's logs will show the real signature error --
 it's a one-line fix in `server.py`.
 
-## Texturing: local paint pipeline, background removal, real root cause found
+## Texturing: local paint pipeline, background removal, the real hang found
 
 A first real `texture: true` call made the whole process unresponsive for
 10+ minutes -- even `/health` stopped answering, with no CUDA OOM logged.
-Investigating turned up a concrete, credible cause rather than a mystery
-deadlock: `server.py` was loading the paint pipeline with
-`Hunyuan3DPaintPipeline.from_pretrained("tencent/Hunyuan3D-2")` and no
-`subfolder`, which silently loads the slow, non-distilled base checkpoint.
-Tencent's own `examples/fast_texture_gen_multiview.py` loads it with
-`subfolder="hunyuan3d-paint-v2-0-turbo"` instead -- the distilled model that
-exists specifically to make this fast. `_load_paint_pipeline()` now tries
-that turbo checkpoint first, falling back to the base one only if it's
-missing, same pattern as the shape loader.
+Two things were fixed here, and only the second one turned out to be the
+actual cause.
 
-Separately (and unrelated to the hang): an uploaded photo's background was
-getting reconstructed as 3D geometry too. Confirmed against Hunyuan3D-2's
-own `gradio_app.py` -- it unconditionally runs every RGB input image through
-`hy3dgen.rembg.BackgroundRemover` before shape generation, since the shape
-model has no "subject vs. environment" concept and needs the background
-already gone. `server.py` now does the same for every image, uploaded or
-generated.
+**Checkpoint (real bug, not the hang):** `server.py` was loading the paint
+pipeline with `Hunyuan3DPaintPipeline.from_pretrained("tencent/Hunyuan3D-2")`
+and no `subfolder`, silently loading the slow, non-distilled base
+checkpoint. Tencent's own `examples/fast_texture_gen_multiview.py` loads it
+with `subfolder="hunyuan3d-paint-v2-0-turbo"` instead. Fixed via
+`_load_paint_pipeline()`'s fallback chain -- but confirmed live this alone
+did NOT fix the hang: with the turbo checkpoint correctly loaded, the exact
+same freeze recurred (container logs went completely silent, `/health`
+timed out at the network level for 10+ minutes, right as texturing began).
+
+**The actual hang:** `Hunyuan3DPaintPipeline.__call__()`'s first real step
+is `mesh_uv_wrap()`, which calls `xatlas.parametrize()` for UV unwrapping --
+a synchronous, single-threaded C++ call that prints zero progress and holds
+the GIL for its entire duration. UV atlas packing cost scales hard with
+face count. This session also raised `octree_resolution` from 256 to 384
+for shape quality, producing a dense enough mesh that xatlas silently ran
+long enough to freeze the whole process (not just the job -- a GIL-holding
+call blocks every thread, including the one serving `/health`). Confirmed
+by reading Hunyuan3D-2's own `hy3dgen/texgen/pipelines.py` and
+`uv_warp_utils.py` source, and by watching container logs go dead at
+exactly that call.
+
+**Fix:** decimate the mesh to 40k faces (via `simplify_quadric_decimation`,
+needs the `fast-simplification` pip package) before texturing, only when
+`texture: true`. Texture detail comes from the UV texture map, not mesh
+density, so a lower-poly mesh for texturing than for shape is the standard
+game/VFX pipeline tradeoff anyway, not just a workaround -- and it keeps the
+higher-detail 384-resolution mesh for shape-only requests. Reported as
+`simplify_seconds` in `/status`.
+
+Separately (and unrelated to either bug above): an uploaded photo's
+background was getting reconstructed as 3D geometry too. Confirmed against
+Hunyuan3D-2's own `gradio_app.py` -- it unconditionally runs every RGB input
+image through `hy3dgen.rembg.BackgroundRemover` before shape generation,
+since the shape model has no "subject vs. environment" concept and needs
+the background already gone. `server.py` now does the same for every image,
+uploaded or generated.
 
 Quality settings were also raised now that there's a larger (~30s) time
 budget instead of ~10s: shape `num_inference_steps` 12 -> 25,
@@ -116,8 +139,8 @@ curl -X POST http://<endpoint>/generate \
 
 curl http://<endpoint>/status/<job_id>
 # -> {"status": "done", "image_seconds": 0.0, "rembg_seconds": 0.3,
-#     "shape_seconds": 18.4, "texture_seconds": 0.0, "export_seconds": 0.3,
-#     "total_seconds": 19.0}
+#     "shape_seconds": 18.4, "simplify_seconds": 0.0, "texture_seconds": 0.0,
+#     "export_seconds": 0.3, "total_seconds": 19.0}
 
 curl http://<endpoint>/result/<job_id> -o model.glb
 ```

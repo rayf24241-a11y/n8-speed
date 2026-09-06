@@ -78,7 +78,7 @@ ENV PYTHONPATH=/app/Hunyuan3D-2:${PYTHONPATH}
 
 WORKDIR /app
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart pillow \
-    diffusers accelerate huggingface_hub
+    diffusers accelerate huggingface_hub fast-simplification
 
 # Model weights are NOT baked in at build time -- tens of GB of checkpoints
 # blew the disk budget on every build environment tried (local Docker

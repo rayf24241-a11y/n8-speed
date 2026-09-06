@@ -208,8 +208,30 @@ def _run_job(job_id: str):
         mesh = max(components, key=lambda m: len(m.vertices))
     cleanup_seconds = time.time() - t_clean
 
+    simplify_seconds = 0.0
     texture_seconds = 0.0
     if req.texture:
+        # Confirmed live: the paint pipeline's very first step is
+        # hy3dgen.texgen.utils.uv_warp_utils.mesh_uv_wrap(), which calls
+        # xatlas.parametrize() -- a synchronous, single-threaded C++ call
+        # that prints zero progress and holds the GIL for its entire
+        # duration. UV atlas packing cost scales hard with face count, and
+        # raising octree_resolution to 384 this session produced a dense
+        # enough mesh that this call ran long enough to freeze the whole
+        # process -- including /health -- for 10+ minutes with no error and
+        # no log line, exactly matching the original "hang". Not a checkpoint
+        # issue (turbo vs base share this same code path).
+        #
+        # Fix: decimate before texturing. Texture detail comes from the UV
+        # texture map, not mesh density, so a lower-poly mesh for texturing
+        # than for shape is the standard game/VFX pipeline tradeoff anyway,
+        # not just a workaround. 40k faces is comfortably inside xatlas's
+        # fast range regardless of how dense the shape output was.
+        t_simplify = time.time()
+        if len(mesh.faces) > 40000:
+            mesh = mesh.simplify_quadric_decimation(face_count=40000)
+        simplify_seconds = time.time() - t_simplify
+
         t1 = time.time()
         mesh = paint_pipeline(mesh, image=image_nobg)
         texture_seconds = time.time() - t1
@@ -226,10 +248,12 @@ def _run_job(job_id: str):
         job["rembg_seconds"] = round(rembg_seconds, 2)
         job["shape_seconds"] = round(shape_seconds, 2)
         job["cleanup_seconds"] = round(cleanup_seconds, 2)
+        job["simplify_seconds"] = round(simplify_seconds, 2)
         job["texture_seconds"] = round(texture_seconds, 2)
         job["export_seconds"] = round(export_seconds, 2)
         job["total_seconds"] = round(
-            image_seconds + rembg_seconds + shape_seconds + cleanup_seconds + texture_seconds + export_seconds, 2
+            image_seconds + rembg_seconds + shape_seconds + cleanup_seconds
+            + simplify_seconds + texture_seconds + export_seconds, 2
         )
 
 
@@ -286,6 +310,7 @@ def status(job_id: str):
         resp["rembg_seconds"] = job["rembg_seconds"]
         resp["shape_seconds"] = job["shape_seconds"]
         resp["cleanup_seconds"] = job["cleanup_seconds"]
+        resp["simplify_seconds"] = job["simplify_seconds"]
         resp["texture_seconds"] = job["texture_seconds"]
         resp["export_seconds"] = job["export_seconds"]
         resp["total_seconds"] = job["total_seconds"]
