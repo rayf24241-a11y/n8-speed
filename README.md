@@ -8,12 +8,13 @@ RunPod RTX 4090 pod.
 - `Dockerfile` -- CUDA 12.4 base, PyTorch cu124 (targets the RTX 4090 we're
   actually running on -- a 12.8 base got flat-out rejected on real RunPod
   hosts whose drivers only support up to 12.4; a 5090 needs a separate
-  12.8-based image later, not this one), Hunyuan3D-2 cloned + its compiled
-  CUDA extensions. Model weights are **not** baked in (see below).
+  12.8-based image later, not this one), Hunyuan3D-2 cloned for shape
+  generation only. Model weights are **not** baked in (see below).
 - `server.py` -- FastAPI app: one job queue, one worker thread (matches one
   GPU). `/generate` queues a job, `/status/{id}` polls it, `/result/{id}`
   downloads the `.glb`. Loading the models at process start triggers their
   download from Hugging Face automatically if they're not already cached.
+  Texturing is NOT done on this GPU -- see below.
 - `.github/workflows/build.yml` -- builds and pushes the image on every push
   to `main`. This exists because building locally hit a wall twice: a
   Docker Desktop bug on the dev machine, and separately, this build is
@@ -52,11 +53,37 @@ first deploy** -- if it fell back past the first candidate, open
 https://huggingface.co/tencent/Hunyuan3D-2mini and fix the subfolder string in
 `server.py`'s `_load_shape_pipeline()`.
 
-Also unverified: the exact `pipeline(image=image)[0]` / `paint_pipeline(mesh,
-image=image)` call signatures match the Hunyuan3D-2 README pattern from
-memory. If the container throws on the first `/generate` call, the pod's
-logs will show the real signature error -- it's a one-line fix in
-`server.py`.
+Also unverified: the exact `pipeline(image=image)[0]` call signature matches
+the Hunyuan3D-2 README pattern from memory. If the container throws on the
+first `/generate` call, the pod's logs will show the real signature error --
+it's a one-line fix in `server.py`.
+
+## Texturing runs on Tripo3D's API, not this GPU
+
+The original design ran Hunyuan3D-2's own paint pipeline in-process. That's
+gone: confirmed live that its custom-compiled CUDA rasterizer/renderer
+extensions hung the *entire* process on their first real invocation --
+10+ minutes with even `/health` unresponsive, no CUDA OOM error logged. That
+points to a stall/deadlock inside those extensions, not a resource limit --
+so a bigger or smaller GPU wouldn't have fixed it, and debugging someone
+else's custom rasterizer wasn't worth it when a $0.10/job API sidesteps the
+whole class of bug.
+
+`_texture_via_tripo()` in `server.py` now: uploads the generated mesh to
+Tripo3D's S3 storage via a temporary STS credential, registers it as an
+`import_model` task, uploads the reference image, kicks off a `texture_model`
+task pointed at the imported mesh, polls until done, and downloads the
+textured `.glb`.
+
+**Requires a `TRIPO_API_KEY` env var set on the RunPod pod** (Pod ->
+Settings -> Environment Variables). Get one at
+https://developers.tripo3d.ai (Bearer token, `tsk_...`). Without it, a
+`texture: true` request fails immediately with a clear error instead of
+hanging -- shape-only generation is unaffected either way.
+
+Cost: ~$0.10/job at standard quality (10 credits @ $0.01/credit), $0.20 for
+HD, $0.30 for 8K Ultra -- pass `texture_quality` through if you want to
+expose that later. No subscription needed, pay-as-you-go.
 
 ## Getting the image built
 
@@ -92,8 +119,9 @@ curl http://<endpoint>/status/<job_id>
 curl http://<endpoint>/result/<job_id> -o model.glb
 ```
 
-Add `"texture": true` to also run the paint pipeline (slower, separate
-`texture_seconds` reported). Add `"prompt": "a red toy car"` instead of
+Add `"texture": true` to also texture via Tripo3D's API (needs
+`TRIPO_API_KEY` set on the pod; slower, separate `texture_seconds`
+reported, ~$0.10 per job). Add `"prompt": "a red toy car"` instead of
 `image_b64` to go text -> (1-step SDXL-Turbo image) -> mesh.
 
 ## Next steps once this is live

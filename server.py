@@ -10,6 +10,7 @@ container instead of adding concurrency inside one of them.
 """
 import base64
 import io
+import os
 import queue
 import threading
 import time
@@ -18,6 +19,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import boto3
+import requests
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -89,12 +92,99 @@ def _load_shape_pipeline():
 
 shape_pipeline = _load_shape_pipeline()
 
-print("Loading texture (paint) pipeline...", flush=True)
-from hy3dgen.texgen import Hunyuan3DPaintPipeline  # noqa: E402
-
-paint_pipeline = Hunyuan3DPaintPipeline.from_pretrained("tencent/Hunyuan3D-2")
-
 print("N8 Speed ready.", flush=True)
+
+# ---------------------------------------------------------------------------
+# Texturing via Tripo3D's API
+# ---------------------------------------------------------------------------
+# The in-process paint pipeline (Hunyuan3D's Hunyuan3DPaintPipeline, backed
+# by custom-compiled CUDA rasterizer/renderer extensions) is gone on purpose:
+# confirmed live that its first real invocation hung the entire process for
+# 10+ minutes -- even unrelated endpoints like /health stopped responding,
+# with no CUDA OOM error logged, which points to a stall/deadlock inside
+# those extensions rather than a resource limit. Rather than debug someone
+# else's custom CUDA rasterizer, texturing is offloaded to Tripo3D's
+# texture_model API: cheapest confirmed real texture-only endpoint at
+# $0.10/job (standard quality), and it can't hang our own GPU/process even
+# if it's slow or fails.
+TRIPO_API_KEY = os.environ.get("TRIPO_API_KEY")
+TRIPO_BASE = "https://api.tripo3d.ai/v2/openapi"
+
+
+def _tripo_call(method: str, path: str, timeout: int = 30, **kwargs):
+    resp = requests.request(method, f"{TRIPO_BASE}{path}", timeout=timeout, **kwargs)
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get("code") != 0:
+        raise RuntimeError(f"Tripo API error on {path}: {body}")
+    return body["data"]
+
+
+def _tripo_wait(task_id: str, timeout: int = 180, interval: int = 2):
+    headers = {"Authorization": f"Bearer {TRIPO_API_KEY}"}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = _tripo_call("GET", f"/task/{task_id}", headers=headers)
+        status = data["status"]
+        if status == "success":
+            return data
+        if status in ("failed", "banned", "expired", "cancelled", "unknown"):
+            raise RuntimeError(f"Tripo task {task_id} ended with status={status}")
+        time.sleep(interval)
+    raise TimeoutError(f"Tripo task {task_id} timed out after {timeout}s")
+
+
+def _texture_via_tripo(mesh, image: Image.Image) -> bytes:
+    if not TRIPO_API_KEY:
+        raise RuntimeError(
+            "TRIPO_API_KEY is not set on this pod -- texture generation needs "
+            "a Tripo3D API key (developers.tripo3d.ai) added as an env var."
+        )
+    headers = {"Authorization": f"Bearer {TRIPO_API_KEY}"}
+
+    # 1. Upload our mesh to Tripo's storage via a temporary S3 credential
+    # (the simple multipart upload endpoint only accepts images, not models).
+    sts = _tripo_call("POST", "/upload/sts/token", headers=headers, json={"format": "glb"})
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=sts["sts_ak"],
+        aws_secret_access_key=sts["sts_sk"],
+        aws_session_token=sts["session_token"],
+        region_name="us-west-2",
+    )
+    s3.put_object(Bucket=sts["resource_bucket"], Key=sts["resource_uri"], Body=mesh.export(file_type="glb"))
+
+    # 2. Register the uploaded mesh as an "imported model" task, then wait
+    # for it to finish (texture_model can't reference it until it succeeds).
+    import_task = _tripo_call(
+        "POST", "/task", headers=headers,
+        json={"type": "import_model", "file": {"object": {"bucket": sts["resource_bucket"], "key": sts["resource_uri"]}}},
+    )
+    _tripo_wait(import_task["task_id"], timeout=60)
+
+    # 3. Upload the reference image (plain multipart, images only).
+    img_buf = io.BytesIO()
+    image.save(img_buf, format="PNG")
+    img_data = _tripo_call(
+        "POST", "/upload/sts", headers=headers,
+        files={"file": ("reference.png", img_buf.getvalue(), "image/png")},
+    )
+
+    # 4. Kick off texturing against the imported mesh, using our image as
+    # the texture reference, and wait for the result.
+    tex_task = _tripo_call(
+        "POST", "/task", headers=headers,
+        json={
+            "type": "texture_model",
+            "original_model_task_id": import_task["task_id"],
+            "texture_prompt": {"image": {"type": "png", "file_token": img_data["image_token"]}},
+        },
+    )
+    result = _tripo_wait(tex_task["task_id"], timeout=180)
+
+    download_url = result["output"].get("pbr_model") or result["output"]["model"]
+    return requests.get(download_url, timeout=60).content
+
 
 # ---------------------------------------------------------------------------
 # Single-worker job queue
@@ -166,14 +256,18 @@ def _run_job(job_id: str):
     cleanup_seconds = time.time() - t_clean
 
     texture_seconds = 0.0
+    textured_bytes = None
     if req.texture:
         t1 = time.time()
-        mesh = paint_pipeline(mesh, image=image)
+        textured_bytes = _texture_via_tripo(mesh, image)
         texture_seconds = time.time() - t1
 
     t2 = time.time()
     out_path = OUTPUT_DIR / f"{job_id}.glb"
-    mesh.export(str(out_path))
+    if textured_bytes is not None:
+        out_path.write_bytes(textured_bytes)
+    else:
+        mesh.export(str(out_path))
     export_seconds = time.time() - t2
 
     with jobs_lock:

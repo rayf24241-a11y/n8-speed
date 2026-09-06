@@ -39,35 +39,12 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# --- Hunyuan3D-2 (shape + texture pipelines) ---
+# --- Hunyuan3D-2 (shape pipeline only -- texturing is Tripo3D's API now,
+# see server.py) ---
 RUN git clone --depth 1 https://github.com/Tencent/Hunyuan3D-2.git /app/Hunyuan3D-2
 WORKDIR /app/Hunyuan3D-2
 
-# The paint pipeline's own code calls DiffusionPipeline.from_pretrained()
-# internally without trust_remote_code=True, so diffusers refuses to
-# execute hunyuanpaint's custom pipeline.py -- confirmed on a real deploy:
-# "ValueError: ... contains custom code in pipeline.py which must be
-# executed ... Pass trust_remote_code=True".
-#
-# Inserting the kwarg right after "from_pretrained(" (an earlier version of
-# this patch) broke on a real deploy: that particular call's first argument
-# is positional, so prepending a keyword arg produced
-# "SyntaxError: positional argument follows keyword argument". Appending
-# right before the call's own closing ")" instead is safe regardless of
-# what positional args come first, since a trailing keyword arg is always
-# valid Python. Matches multiview_utils.py's confirmed exact call tail
-# (torch_dtype=torch.float16)) and applies repo-wide in case other call
-# sites share it -- trust_remote_code is a no-op for pipelines that don't
-# need it, so over-matching is harmless.
-RUN grep -rl "DiffusionPipeline.from_pretrained(" hy3dgen/ | \
-    xargs -r sed -i 's/torch_dtype=torch\.float16)/torch_dtype=torch.float16, trust_remote_code=True)/g'
-
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Compiled CUDA extensions the texture pipeline needs (rasterizer + renderer).
-# TORCH_CUDA_ARCH_LIST above makes these build with 4090/3090 kernels included.
-RUN pip install --no-cache-dir -e hy3dgen/texgen/custom_rasterizer \
-    && pip install --no-cache-dir ./hy3dgen/texgen/differentiable_renderer
 
 # requirements.txt only installs hy3dgen's *dependencies*, not the hy3dgen
 # package itself -- confirmed on a real deploy: "ModuleNotFoundError: No
@@ -78,7 +55,7 @@ ENV PYTHONPATH=/app/Hunyuan3D-2:${PYTHONPATH}
 
 WORKDIR /app
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart pillow \
-    diffusers accelerate huggingface_hub
+    diffusers accelerate huggingface_hub boto3 requests
 
 # Model weights are NOT baked in at build time -- tens of GB of checkpoints
 # blew the disk budget on every build environment tried (local Docker
