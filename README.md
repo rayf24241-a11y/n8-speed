@@ -8,13 +8,13 @@ RunPod RTX 4090 pod.
 - `Dockerfile` -- CUDA 12.4 base, PyTorch cu124 (targets the RTX 4090 we're
   actually running on -- a 12.8 base got flat-out rejected on real RunPod
   hosts whose drivers only support up to 12.4; a 5090 needs a separate
-  12.8-based image later, not this one), Hunyuan3D-2 cloned for shape
-  generation only. Model weights are **not** baked in (see below).
+  12.8-based image later, not this one), Hunyuan3D-2 cloned + its compiled
+  CUDA extensions (shape AND texture pipelines both run on this GPU). Model
+  weights are **not** baked in (see below).
 - `server.py` -- FastAPI app: one job queue, one worker thread (matches one
   GPU). `/generate` queues a job, `/status/{id}` polls it, `/result/{id}`
   downloads the `.glb`. Loading the models at process start triggers their
   download from Hugging Face automatically if they're not already cached.
-  Texturing is NOT done on this GPU -- see below.
 - `.github/workflows/build.yml` -- builds and pushes the image on every push
   to `main`. This exists because building locally hit a wall twice: a
   Docker Desktop bug on the dev machine, and separately, this build is
@@ -58,32 +58,34 @@ the Hunyuan3D-2 README pattern from memory. If the container throws on the
 first `/generate` call, the pod's logs will show the real signature error --
 it's a one-line fix in `server.py`.
 
-## Texturing runs on Tripo3D's API, not this GPU
+## Texturing: local paint pipeline, background removal, real root cause found
 
-The original design ran Hunyuan3D-2's own paint pipeline in-process. That's
-gone: confirmed live that its custom-compiled CUDA rasterizer/renderer
-extensions hung the *entire* process on their first real invocation --
-10+ minutes with even `/health` unresponsive, no CUDA OOM error logged. That
-points to a stall/deadlock inside those extensions, not a resource limit --
-so a bigger or smaller GPU wouldn't have fixed it, and debugging someone
-else's custom rasterizer wasn't worth it when a $0.10/job API sidesteps the
-whole class of bug.
+A first real `texture: true` call made the whole process unresponsive for
+10+ minutes -- even `/health` stopped answering, with no CUDA OOM logged.
+Investigating turned up a concrete, credible cause rather than a mystery
+deadlock: `server.py` was loading the paint pipeline with
+`Hunyuan3DPaintPipeline.from_pretrained("tencent/Hunyuan3D-2")` and no
+`subfolder`, which silently loads the slow, non-distilled base checkpoint.
+Tencent's own `examples/fast_texture_gen_multiview.py` loads it with
+`subfolder="hunyuan3d-paint-v2-0-turbo"` instead -- the distilled model that
+exists specifically to make this fast. `_load_paint_pipeline()` now tries
+that turbo checkpoint first, falling back to the base one only if it's
+missing, same pattern as the shape loader.
 
-`_texture_via_tripo()` in `server.py` now: uploads the generated mesh to
-Tripo3D's S3 storage via a temporary STS credential, registers it as an
-`import_model` task, uploads the reference image, kicks off a `texture_model`
-task pointed at the imported mesh, polls until done, and downloads the
-textured `.glb`.
+Separately (and unrelated to the hang): an uploaded photo's background was
+getting reconstructed as 3D geometry too. Confirmed against Hunyuan3D-2's
+own `gradio_app.py` -- it unconditionally runs every RGB input image through
+`hy3dgen.rembg.BackgroundRemover` before shape generation, since the shape
+model has no "subject vs. environment" concept and needs the background
+already gone. `server.py` now does the same for every image, uploaded or
+generated.
 
-**Requires a `TRIPO_API_KEY` env var set on the RunPod pod** (Pod ->
-Settings -> Environment Variables). Get one at
-https://developers.tripo3d.ai (Bearer token, `tsk_...`). Without it, a
-`texture: true` request fails immediately with a clear error instead of
-hanging -- shape-only generation is unaffected either way.
-
-Cost: ~$0.10/job at standard quality (10 credits @ $0.01/credit), $0.20 for
-HD, $0.30 for 8K Ultra -- pass `texture_quality` through if you want to
-expose that later. No subscription needed, pay-as-you-go.
+Quality settings were also raised now that there's a larger (~30s) time
+budget instead of ~10s: shape `num_inference_steps` 12 -> 25,
+`octree_resolution` 256 -> 384 (Hunyuan3D-2's own default), SDXL-Turbo
+1 -> 2 steps. Watch the real `shape_seconds`/`texture_seconds` numbers on
+first deploy and tune from there -- these are informed estimates, not
+guaranteed timings.
 
 ## Getting the image built
 
@@ -106,30 +108,30 @@ set up: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
 ## API
 
 ```bash
-# image -> mesh only (~10s target)
+# image -> mesh only (~30s quality target)
 curl -X POST http://<endpoint>/generate \
   -H "Content-Type: application/json" \
   -d '{"image_b64": "<base64 png/jpg>"}'
 # -> {"job_id": "...", "queue_position": 1, "message": "Generating..."}
 
 curl http://<endpoint>/status/<job_id>
-# -> {"status": "done", "image_seconds": 0.0, "shape_seconds": 8.4,
-#     "texture_seconds": 0.0, "export_seconds": 0.3, "total_seconds": 8.7}
+# -> {"status": "done", "image_seconds": 0.0, "rembg_seconds": 0.3,
+#     "shape_seconds": 18.4, "texture_seconds": 0.0, "export_seconds": 0.3,
+#     "total_seconds": 19.0}
 
 curl http://<endpoint>/result/<job_id> -o model.glb
 ```
 
-Add `"texture": true` to also texture via Tripo3D's API (needs
-`TRIPO_API_KEY` set on the pod; slower, separate `texture_seconds`
-reported, ~$0.10 per job). Add `"prompt": "a red toy car"` instead of
-`image_b64` to go text -> (1-step SDXL-Turbo image) -> mesh.
+Add `"texture": true` to also run the local paint pipeline (slower, separate
+`texture_seconds` reported). Add `"prompt": "a red toy car"` instead of
+`image_b64` to go text -> (SDXL-Turbo image) -> mesh.
 
 ## Next steps once this is live
 
 1. Deploy with the volume mounted, watch startup logs for the weight
    download and which shape checkpoint actually loaded.
 2. Hit `/generate` a few times, note real `shape_seconds` on the 4090 --
-   that's your actual number against the 10s target, not a guess.
+   that's your actual number against the ~30s quality target, not a guess.
 3. If shape gen is still too slow, the first lever is inference steps on the
    shape pipeline (check `hy3dgen/shapegen` for a `num_inference_steps` /
    `steps` kwarg) before considering different hardware.
