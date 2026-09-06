@@ -113,15 +113,27 @@ def _run_job(job_id: str):
     else:
         raise ValueError("Provide either 'prompt' or 'image_b64'")
 
-    # Split out from the export step below -- previously this was the only
-    # thing timed, so a slow mesh.export() (marching cubes / octree
-    # extraction, not diffusion) would have been invisible in shape_seconds.
+    # NOTE: shape_seconds times the whole shape_pipeline() call, which
+    # internally does denoising AND mesh extraction (VAE decode + marching
+    # cubes via vae.latents2mesh()) in one black box -- export_seconds below
+    # only covers OUR mesh.export() glb write, not that internal extraction.
+    # So this can't separate "slow diffusion" from "slow mesh extraction"
+    # on its own; see the two params tuned below for that instead.
     t0 = time.time()
-    # Hunyuan3DDiTFlowMatchingPipeline defaults to num_inference_steps=50 --
-    # fine for the base checkpoint, but defeats the whole point of the
-    # mini-turbo checkpoint (few-step distilled, designed for ~5 steps).
-    # Starting guess; tune against the real shape_seconds this logs.
-    mesh = shape_pipeline(image=image, num_inference_steps=5)[0]
+    mesh = shape_pipeline(
+        image=image,
+        # Defaults to 50 -- fine for the base checkpoint, but defeats the
+        # point of the mini-turbo checkpoint (few-step distilled, designed
+        # for ~5 steps). Starting guess; tune against the real number this
+        # logs.
+        num_inference_steps=5,
+        # Defaults to 384. Confirmed via the pipeline source (Hunyuan3D-2's
+        # own docs describe this as "a significant computational cost...
+        # independent of diffusion step count") -- this, not step count, is
+        # the leading suspect for why a 5-step run still took ~18.6s.
+        # Starting guess at roughly 2/3 resolution; tune from here.
+        octree_resolution=256,
+    )[0]
     shape_seconds = time.time() - t0
 
     texture_seconds = 0.0
