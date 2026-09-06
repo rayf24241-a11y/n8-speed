@@ -5,10 +5,11 @@ RunPod RTX 4090 pod.
 
 ## What's here
 
-- `Dockerfile` -- CUDA 12.8 base, PyTorch cu128 (required for 5090/Blackwell;
-  also works on the 4090 we're actually running on), Hunyuan3D-2 cloned +
-  its compiled CUDA extensions. Model weights are **not** baked in (see
-  below).
+- `Dockerfile` -- CUDA 12.4 base, PyTorch cu124 (targets the RTX 4090 we're
+  actually running on -- a 12.8 base got flat-out rejected on real RunPod
+  hosts whose drivers only support up to 12.4; a 5090 needs a separate
+  12.8-based image later, not this one), Hunyuan3D-2 cloned + its compiled
+  CUDA extensions. Model weights are **not** baked in (see below).
 - `server.py` -- FastAPI app: one job queue, one worker thread (matches one
   GPU). `/generate` queues a job, `/status/{id}` polls it, `/result/{id}`
   downloads the `.glb`. Loading the models at process start triggers their

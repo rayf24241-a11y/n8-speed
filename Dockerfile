@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -7,17 +7,22 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/app/hf-cache \
     HF_HUB_ENABLE_HF_TRANSFER=0 \
     HF_HUB_DISABLE_XET=1 \
-    TORCH_CUDA_ARCH_LIST="8.6;8.9;12.0"
+    TORCH_CUDA_ARCH_LIST="8.6;8.9"
 
 # PIP_BREAK_SYSTEM_PACKAGES: Ubuntu 24.04 marks the system Python as
 # "externally managed" (PEP 668) and refuses bare `pip install`. There's no
 # real "system" to protect inside an isolated container, so this is safe here.
 
-# TORCH_CUDA_ARCH_LIST covers 3090/3090Ti (8.6), 4090 (8.9), and 5090 (12.0,
-# Blackwell) -- so this same image works if you add cheaper GPU workers later.
-# 5090 support specifically REQUIRES this; older prebuilt wheels/extensions
-# compiled without sm_120 fail at runtime with "no kernel image is available
-# for execution on the device".
+# CUDA 12.4, not 12.8: originally targeted the RTX 5090 (Blackwell, needs
+# cuda>=12.8), but we're actually deploying on RTX 4090s on RunPod, and a
+# 12.8-based image got flat-out rejected by real hosts there --
+# "nvidia-container-cli: requirement error: unsatisfied condition:
+# cuda>=12.8, please update your driver" -- because plenty of hosts in the
+# fleet only have drivers supporting up to 12.4. 12.4 covers 4090 (8.9) and
+# 3090/3090Ti (8.6) fully and runs on far more real hosts. If a 5090 worker
+# gets added later, that's a separate image built with a 12.8 base + arch
+# 12.0 added back in -- don't try to make one image serve both, that's what
+# just broke.
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.12 python3.12-dev python3-pip python3-venv \
@@ -28,9 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# PyTorch built against CUDA 12.8 -- the only wheel line with Blackwell (5090)
-# kernels. Do not swap this for a cu121/cu124 index url.
-RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu128
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
 # --- Hunyuan3D-2 (shape + texture pipelines) ---
 RUN git clone --depth 1 https://github.com/Tencent/Hunyuan3D-2.git /app/Hunyuan3D-2
@@ -38,7 +41,7 @@ WORKDIR /app/Hunyuan3D-2
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Compiled CUDA extensions the texture pipeline needs (rasterizer + renderer).
-# TORCH_CUDA_ARCH_LIST above makes these build with sm_120 (5090) kernels included.
+# TORCH_CUDA_ARCH_LIST above makes these build with 4090/3090 kernels included.
 RUN pip install --no-cache-dir -e hy3dgen/texgen/custom_rasterizer \
     && pip install --no-cache-dir ./hy3dgen/texgen/differentiable_renderer
 
