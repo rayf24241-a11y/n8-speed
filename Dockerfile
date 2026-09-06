@@ -47,11 +47,20 @@ WORKDIR /app/Hunyuan3D-2
 # internally without trust_remote_code=True, so diffusers refuses to
 # execute hunyuanpaint's custom pipeline.py -- confirmed on a real deploy:
 # "ValueError: ... contains custom code in pipeline.py which must be
-# executed ... Pass trust_remote_code=True". Patch every call site in the
-# repo rather than just the one that's crashed so far, since the paint
-# pipeline loads multiple sub-models this same way.
+# executed ... Pass trust_remote_code=True".
+#
+# Inserting the kwarg right after "from_pretrained(" (an earlier version of
+# this patch) broke on a real deploy: that particular call's first argument
+# is positional, so prepending a keyword arg produced
+# "SyntaxError: positional argument follows keyword argument". Appending
+# right before the call's own closing ")" instead is safe regardless of
+# what positional args come first, since a trailing keyword arg is always
+# valid Python. Matches multiview_utils.py's confirmed exact call tail
+# (torch_dtype=torch.float16)) and applies repo-wide in case other call
+# sites share it -- trust_remote_code is a no-op for pipelines that don't
+# need it, so over-matching is harmless.
 RUN grep -rl "DiffusionPipeline.from_pretrained(" hy3dgen/ | \
-    xargs -r sed -i 's/DiffusionPipeline\.from_pretrained(/DiffusionPipeline.from_pretrained(trust_remote_code=True, /g'
+    xargs -r sed -i 's/torch_dtype=torch\.float16)/torch_dtype=torch.float16, trust_remote_code=True)/g'
 
 RUN pip install --no-cache-dir -r requirements.txt
 
