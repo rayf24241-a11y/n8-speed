@@ -49,6 +49,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir -e hy3dgen/texgen/custom_rasterizer \
     && pip install --no-cache-dir ./hy3dgen/texgen/differentiable_renderer
 
+# requirements.txt only installs hy3dgen's *dependencies*, not the hy3dgen
+# package itself -- confirmed on a real deploy: "ModuleNotFoundError: No
+# module named 'hy3dgen'" the moment server.py tried to import it. Put the
+# repo root on PYTHONPATH instead of relying on the repo having proper
+# setup.py packaging (it may not).
+ENV PYTHONPATH=/app/Hunyuan3D-2:${PYTHONPATH}
+
 WORKDIR /app
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart pillow \
     diffusers accelerate huggingface_hub
