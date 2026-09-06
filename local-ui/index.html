@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>N8 Speed</title>
+<script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer/dist/model-viewer.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #12151c;
+    --border: #232733;
+    --text: #e8eaf0;
+    --dim: #8890a0;
+    --accent: #5b8cff;
+    --accent-dim: #2c3a5c;
+    --good: #43d17a;
+    --bad: #ff5c6c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+  }
+  header { text-align: center; margin-bottom: 28px; }
+  h1 { margin: 0; font-size: 28px; letter-spacing: -0.5px; }
+  h1 span { color: var(--accent); }
+  header p { margin: 6px 0 0; color: var(--dim); font-size: 14px; }
+
+  .layout {
+    display: flex;
+    gap: 20px;
+    width: 100%;
+    max-width: 920px;
+    flex-wrap: wrap;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    flex: 1 1 340px;
+  }
+
+  label { display: block; font-size: 13px; color: var(--dim); margin: 14px 0 6px; }
+  label:first-child { margin-top: 0; }
+
+  textarea, input[type=text] {
+    width: 100%;
+    background: #0e1016;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    resize: vertical;
+  }
+  textarea:focus, input:focus { outline: none; border-color: var(--accent); }
+
+  .file-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #0e1016;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--dim);
+  }
+  .file-row button { font-size: 12px; padding: 4px 8px; }
+
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    font-size: 13px;
+    color: var(--dim);
+  }
+
+  button.generate {
+    width: 100%;
+    margin-top: 20px;
+    padding: 12px;
+    background: var(--accent);
+    color: #0b0d12;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.generate:disabled { background: var(--accent-dim); color: var(--dim); cursor: default; }
+  button.generate:hover:not(:disabled) { filter: brightness(1.1); }
+
+  button.secondary {
+    background: #1a1e28;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .status {
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--dim);
+    min-height: 18px;
+  }
+  .status.error { color: var(--bad); }
+  .status.done { color: var(--good); }
+
+  .timing {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 16px;
+    font-size: 12px;
+    color: var(--dim);
+  }
+  .timing b { color: var(--text); }
+  .timing .total { grid-column: 1 / -1; font-size: 14px; color: var(--good); margin-top: 4px; }
+
+  .viewer-panel { display: flex; flex-direction: column; align-items: center; }
+  model-viewer {
+    width: 100%;
+    height: 320px;
+    background: #0e1016;
+    border-radius: 8px;
+  }
+  .viewer-placeholder {
+    width: 100%;
+    height: 320px;
+    background: #0e1016;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--dim);
+    font-size: 13px;
+    text-align: center;
+    padding: 20px;
+  }
+  .download-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+    width: 100%;
+  }
+  .download-row.hidden { display: none; }
+  #formatSelect {
+    background: #0e1016;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 0 10px;
+    font-size: 14px;
+  }
+  button.download {
+    flex: 1;
+    background: var(--good);
+    color: #0b0d12;
+    border: none;
+    font-weight: 600;
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button.download:disabled { opacity: 0.6; cursor: default; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>N8<span>Speed</span></h1>
+  <p>Text or image &rarr; 3D mesh</p>
+</header>
+
+<div class="layout">
+  <div class="panel">
+    <label for="prompt">Prompt</label>
+    <textarea id="prompt" rows="3" placeholder="a red toy car"></textarea>
+
+    <label>Or upload an image instead</label>
+    <div class="file-row">
+      <span id="fileLabel">No file chosen</span>
+      <input type="file" id="fileInput" accept="image/*" hidden>
+      <button type="button" class="secondary" onclick="document.getElementById('fileInput').click()">Choose</button>
+      <button type="button" class="secondary" id="clearFileBtn" style="display:none">Clear</button>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="texture">
+      <label for="texture" style="margin:0">Also generate texture (slower)</label>
+    </div>
+
+    <button class="generate" id="generateBtn">Generate</button>
+
+    <div class="status" id="status"></div>
+    <div class="timing" id="timing" style="display:none"></div>
+  </div>
+
+  <div class="panel viewer-panel">
+    <div class="viewer-placeholder" id="viewerPlaceholder">Your model will appear here</div>
+    <model-viewer id="viewer" camera-controls auto-rotate style="display:none"></model-viewer>
+    <div class="download-row hidden" id="downloadRow">
+      <select id="formatSelect">
+        <option value="glb">GLB</option>
+        <option value="fbx">FBX</option>
+      </select>
+      <button type="button" class="download" id="downloadBtn">Download</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const promptEl = document.getElementById('prompt');
+const fileInput = document.getElementById('fileInput');
+const fileLabel = document.getElementById('fileLabel');
+const clearFileBtn = document.getElementById('clearFileBtn');
+const textureEl = document.getElementById('texture');
+const generateBtn = document.getElementById('generateBtn');
+const statusEl = document.getElementById('status');
+const timingEl = document.getElementById('timing');
+const viewer = document.getElementById('viewer');
+const viewerPlaceholder = document.getElementById('viewerPlaceholder');
+const downloadRow = document.getElementById('downloadRow');
+const formatSelect = document.getElementById('formatSelect');
+const downloadBtn = document.getElementById('downloadBtn');
+
+let imageB64 = null;
+let currentJobId = null;
+let glbBlobUrl = null;
+
+function triggerDownload(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+downloadBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  const fmt = formatSelect.value;
+  if (fmt === 'glb') {
+    triggerDownload(glbBlobUrl, 'model.glb');
+    return;
+  }
+  // FBX needs an on-demand conversion pass (headless Blender, ~5-15s) --
+  // not pre-fetched like glb, so this can't be an instant <a download>.
+  downloadBtn.disabled = true;
+  downloadBtn.textContent = 'Converting...';
+  try {
+    const resp = await fetch(`/api/result/${currentJobId}?format=fbx`);
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.error || 'FBX conversion failed');
+    }
+    const blob = await resp.blob();
+    triggerDownload(URL.createObjectURL(blob), 'model.fbx');
+  } catch (err) {
+    setStatus(`Error: ${err.message}`, 'error');
+  } finally {
+    downloadBtn.disabled = false;
+    downloadBtn.textContent = 'Download';
+  }
+});
+
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+  fileLabel.textContent = f.name;
+  clearFileBtn.style.display = 'inline-block';
+  const reader = new FileReader();
+  reader.onload = () => { imageB64 = reader.result.split(',')[1]; };
+  reader.readAsDataURL(f);
+});
+
+clearFileBtn.addEventListener('click', () => {
+  fileInput.value = '';
+  imageB64 = null;
+  fileLabel.textContent = 'No file chosen';
+  clearFileBtn.style.display = 'none';
+});
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+generateBtn.addEventListener('click', async () => {
+  const body = { texture: textureEl.checked };
+  if (imageB64) {
+    body.image_b64 = imageB64;
+  } else if (promptEl.value.trim()) {
+    body.prompt = promptEl.value.trim();
+  } else {
+    setStatus('Enter a prompt or choose an image first.', 'error');
+    return;
+  }
+
+  generateBtn.disabled = true;
+  timingEl.style.display = 'none';
+  downloadRow.classList.add('hidden');
+  currentJobId = null;
+  glbBlobUrl = null;
+  viewer.style.display = 'none';
+  viewerPlaceholder.style.display = 'flex';
+  viewerPlaceholder.textContent = 'Generating...';
+  setStatus('Queuing job...');
+
+  try {
+    const genResp = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const genData = await genResp.json();
+    if (!genResp.ok) throw new Error(genData.error || 'Failed to queue job');
+
+    setStatus(genData.message + (genData.queue_position > 1 ? ` (position ${genData.queue_position})` : ''));
+
+    const jobId = genData.job_id;
+    const start = Date.now();
+
+    while (true) {
+      await new Promise(r => setTimeout(r, 1000));
+      const statusResp = await fetch(`/api/status/${jobId}`);
+      const statusData = await statusResp.json();
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+
+      if (statusData.status === 'error') {
+        setStatus(`Error: ${statusData.error}`, 'error');
+        viewerPlaceholder.textContent = 'Generation failed.';
+        break;
+      }
+      if (statusData.status === 'done') {
+        setStatus(`Done in ${elapsed}s`, 'done');
+        timingEl.style.display = 'grid';
+        timingEl.innerHTML = `
+          <div>Image: <b>${statusData.image_seconds}s</b></div>
+          <div>Shape: <b>${statusData.shape_seconds}s</b></div>
+          <div>Cleanup: <b>${statusData.cleanup_seconds}s</b></div>
+          <div>Texture: <b>${statusData.texture_seconds}s</b></div>
+          <div>Export: <b>${statusData.export_seconds}s</b></div>
+          <div class="total">Server total: ${statusData.total_seconds}s</div>
+        `;
+
+        const resultResp = await fetch(`/api/result/${jobId}`);
+        const blob = await resultResp.blob();
+        glbBlobUrl = URL.createObjectURL(blob);
+        currentJobId = jobId;
+        viewer.src = glbBlobUrl;
+        viewer.style.display = 'block';
+        viewerPlaceholder.style.display = 'none';
+        formatSelect.value = 'glb';
+        downloadRow.classList.remove('hidden');
+        break;
+      }
+      setStatus(`${statusData.status}... (${elapsed}s)`);
+    }
+  } catch (err) {
+    setStatus(`Error: ${err.message}`, 'error');
+    viewerPlaceholder.textContent = 'Something went wrong.';
+  } finally {
+    generateBtn.disabled = false;
+  }
+});
+</script>
+
+</body>
+</html>

@@ -136,6 +136,16 @@ def _run_job(job_id: str):
     )[0]
     shape_seconds = time.time() - t0
 
+    # Mesh cleanup: marching-cubes extraction at this resolution leaves
+    # small floating fragments disconnected from the main body (visible as
+    # scattered debris around generated models). Keep only the largest
+    # connected component -- the actual object -- and drop the rest.
+    t_clean = time.time()
+    components = mesh.split(only_watertight=False)
+    if len(components) > 1:
+        mesh = max(components, key=lambda m: len(m.vertices))
+    cleanup_seconds = time.time() - t_clean
+
     texture_seconds = 0.0
     if req.texture:
         t1 = time.time()
@@ -152,9 +162,12 @@ def _run_job(job_id: str):
         job["result_path"] = str(out_path)
         job["image_seconds"] = round(image_seconds, 2)
         job["shape_seconds"] = round(shape_seconds, 2)
+        job["cleanup_seconds"] = round(cleanup_seconds, 2)
         job["texture_seconds"] = round(texture_seconds, 2)
         job["export_seconds"] = round(export_seconds, 2)
-        job["total_seconds"] = round(image_seconds + shape_seconds + texture_seconds + export_seconds, 2)
+        job["total_seconds"] = round(
+            image_seconds + shape_seconds + cleanup_seconds + texture_seconds + export_seconds, 2
+        )
 
 
 def worker_loop():
@@ -208,6 +221,7 @@ def status(job_id: str):
     if job["status"] == "done":
         resp["image_seconds"] = job["image_seconds"]
         resp["shape_seconds"] = job["shape_seconds"]
+        resp["cleanup_seconds"] = job["cleanup_seconds"]
         resp["texture_seconds"] = job["texture_seconds"]
         resp["export_seconds"] = job["export_seconds"]
         resp["total_seconds"] = job["total_seconds"]
