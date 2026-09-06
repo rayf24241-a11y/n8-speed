@@ -103,13 +103,19 @@ def _run_job(job_id: str):
     job = jobs[job_id]
     req: GenerateRequest = job["request"]
 
+    image_seconds = 0.0
     if req.image_b64:
         image = Image.open(io.BytesIO(base64.b64decode(req.image_b64))).convert("RGB")
     elif req.prompt:
+        t_img = time.time()
         image = txt2img(prompt=req.prompt, num_inference_steps=1, guidance_scale=0.0).images[0]
+        image_seconds = time.time() - t_img
     else:
         raise ValueError("Provide either 'prompt' or 'image_b64'")
 
+    # Split out from the export step below -- previously this was the only
+    # thing timed, so a slow mesh.export() (marching cubes / octree
+    # extraction, not diffusion) would have been invisible in shape_seconds.
     t0 = time.time()
     # Hunyuan3DDiTFlowMatchingPipeline defaults to num_inference_steps=50 --
     # fine for the base checkpoint, but defeats the whole point of the
@@ -124,14 +130,19 @@ def _run_job(job_id: str):
         mesh = paint_pipeline(mesh, image=image)
         texture_seconds = time.time() - t1
 
+    t2 = time.time()
     out_path = OUTPUT_DIR / f"{job_id}.glb"
     mesh.export(str(out_path))
+    export_seconds = time.time() - t2
 
     with jobs_lock:
         job["status"] = "done"
         job["result_path"] = str(out_path)
+        job["image_seconds"] = round(image_seconds, 2)
         job["shape_seconds"] = round(shape_seconds, 2)
         job["texture_seconds"] = round(texture_seconds, 2)
+        job["export_seconds"] = round(export_seconds, 2)
+        job["total_seconds"] = round(image_seconds + shape_seconds + texture_seconds + export_seconds, 2)
 
 
 def worker_loop():
@@ -183,8 +194,11 @@ def status(job_id: str):
         raise HTTPException(404, "job not found")
     resp = {"status": job["status"]}
     if job["status"] == "done":
+        resp["image_seconds"] = job["image_seconds"]
         resp["shape_seconds"] = job["shape_seconds"]
         resp["texture_seconds"] = job["texture_seconds"]
+        resp["export_seconds"] = job["export_seconds"]
+        resp["total_seconds"] = job["total_seconds"]
     if job["status"] == "error":
         resp["error"] = job["error"]
     return resp

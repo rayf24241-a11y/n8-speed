@@ -86,7 +86,8 @@ curl -X POST http://<endpoint>/generate \
 # -> {"job_id": "...", "queue_position": 1, "message": "Generating..."}
 
 curl http://<endpoint>/status/<job_id>
-# -> {"status": "done", "shape_seconds": 8.4, "texture_seconds": 0.0}
+# -> {"status": "done", "image_seconds": 0.0, "shape_seconds": 8.4,
+#     "texture_seconds": 0.0, "export_seconds": 0.3, "total_seconds": 8.7}
 
 curl http://<endpoint>/result/<job_id> -o model.glb
 ```
