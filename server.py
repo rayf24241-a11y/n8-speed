@@ -191,10 +191,17 @@ def _run_job(job_id: str):
         # cost that can't be separated from here. Tune against the real
         # number this logs.
         num_inference_steps=25,
-        # Raised from 256 back to Hunyuan3D-2's own default (384) now that
-        # the time budget allows it -- this was the dominant cost in
-        # earlier measurements, more so than step count.
-        octree_resolution=384,
+        # Lowered back from 384 (Hunyuan3D-2's own default) to 256. 384
+        # isn't just slower on average, it's UNPREDICTABLE: confirmed live
+        # that since we never pin a seed, each SDXL-Turbo image is
+        # different, and Hunyuan3D-2's octree-based adaptive mesh
+        # refinement scales with surface complexity -- one "a cup" call
+        # measured shape_seconds=24.5s, another measured 299.7s (12x) with
+        # no code change, just a harder random shape to refine. 256 was
+        # fast and consistent across every test run (no outliers seen),
+        # trading some mesh detail for an actual time ceiling instead of
+        # an average.
+        octree_resolution=256,
     )[0]
     shape_seconds = time.time() - t0
 

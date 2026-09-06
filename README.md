@@ -91,8 +91,7 @@ exactly that call.
 needs the `fast-simplification` pip package) before texturing, only when
 `texture: true`. Texture detail comes from the UV texture map, not mesh
 density, so a lower-poly mesh for texturing than for shape is the standard
-game/VFX pipeline tradeoff anyway, not just a workaround -- and it keeps the
-higher-detail 384-resolution mesh for shape-only requests. Reported as
+game/VFX pipeline tradeoff anyway, not just a workaround. Reported as
 `simplify_seconds` in `/status`.
 
 Separately (and unrelated to either bug above): an uploaded photo's
@@ -103,12 +102,18 @@ since the shape model has no "subject vs. environment" concept and needs
 the background already gone. `server.py` now does the same for every image,
 uploaded or generated.
 
-Quality settings were also raised now that there's a larger (~30s) time
-budget instead of ~10s: shape `num_inference_steps` 12 -> 25,
-`octree_resolution` 256 -> 384 (Hunyuan3D-2's own default), SDXL-Turbo
-1 -> 2 steps. Watch the real `shape_seconds`/`texture_seconds` numbers on
-first deploy and tune from there -- these are informed estimates, not
-guaranteed timings.
+Quality settings were also raised: shape `num_inference_steps` 12 -> 25,
+SDXL-Turbo 1 -> 2 steps. `octree_resolution` was raised 256 -> 384 and then
+**reverted back to 256** -- confirmed live that 384 isn't just slower on
+average, it's unpredictable. We never pin a seed for the SDXL-Turbo image,
+so every call generates a different shape, and Hunyuan3D-2's octree-based
+adaptive mesh refinement scales with surface complexity: one "a cup" call
+measured `shape_seconds`=24.5s at 384, another measured 299.7s (12x, no code
+change) because that random shape happened to need much deeper refinement.
+256 was fast and consistent across every test run -- no outliers seen --
+trading some mesh detail for an actual time ceiling instead of an average.
+Watch the real `shape_seconds`/`texture_seconds` numbers on deploy and tune
+from there -- these are informed estimates, not guaranteed timings.
 
 ## Getting the image built
 
