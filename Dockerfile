@@ -46,11 +46,13 @@ WORKDIR /app
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart pillow \
     diffusers accelerate huggingface_hub
 
-# Bake model weights into the image at build time so a Salad instance comes
-# up ready to serve immediately -- no multi-GB download stall on first request.
-COPY prefetch_models.py /app/prefetch_models.py
-RUN python /app/prefetch_models.py
-
+# Model weights are NOT baked in at build time -- tens of GB of checkpoints
+# blew the disk budget on every build environment tried (local Docker
+# Desktop, GitHub Actions runners). server.py's from_pretrained() calls
+# download straight from Hugging Face into HF_HOME on first container start
+# instead. Trade-off: first boot after deploy takes a few extra minutes;
+# every boot after that is fast since HF_HOME should live on a persistent
+# volume, not the ephemeral container filesystem.
 COPY server.py /app/server.py
 
 EXPOSE 8000

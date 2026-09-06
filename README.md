@@ -1,26 +1,51 @@
 # N8 Speed
 
-Fast text/image -> 3D mesh, optional texturing, served over HTTP for a
-single Salad RTX 5090 container.
+Fast text/image -> 3D mesh, optional texturing, served over HTTP from a
+RunPod RTX 4090 pod.
 
 ## What's here
 
-- `Dockerfile` -- CUDA 12.8 base, PyTorch cu128 (required for the 5090 /
-  Blackwell / sm_120), Hunyuan3D-2 cloned + its compiled CUDA extensions,
-  model weights baked in at build time.
-- `prefetch_models.py` -- runs during the build to pull weights into the
-  image so a container never has to download anything on first request.
+- `Dockerfile` -- CUDA 12.8 base, PyTorch cu128 (required for 5090/Blackwell;
+  also works on the 4090 we're actually running on), Hunyuan3D-2 cloned +
+  its compiled CUDA extensions. Model weights are **not** baked in (see
+  below).
 - `server.py` -- FastAPI app: one job queue, one worker thread (matches one
   GPU). `/generate` queues a job, `/status/{id}` polls it, `/result/{id}`
-  downloads the `.glb`.
+  downloads the `.glb`. Loading the models at process start triggers their
+  download from Hugging Face automatically if they're not already cached.
+- `.github/workflows/build.yml` -- builds and pushes the image on every push
+  to `main`. This exists because building locally hit a wall twice: a
+  Docker Desktop bug on the dev machine, and separately, this build is
+  simply too large (CUDA base + PyTorch + Hunyuan3D-2, tens of GB once you
+  add weights) to fit on a disk-limited machine reliably. Building on
+  GitHub's own runners sidesteps both problems.
 
-## Known risk before first real run
+## Why weights aren't baked into the image
+
+Originally they were. That blew the disk budget on *every* build
+environment tried -- the local dev machine's C: drive, and then GitHub
+Actions' own runner ("No space left on device", confirmed in that build's
+failure logs). Baking in even a trimmed set of checkpoints plus the CUDA
+toolchain landed north of 60GB, which nothing here could reliably hold
+through a full Docker build.
+
+Instead, `server.py`'s `from_pretrained()` calls download straight from
+Hugging Face into `HF_HOME` the first time the container actually starts.
+
+**This makes a persistent volume for `HF_HOME` (`/app/hf-cache`) mandatory
+on RunPod, not optional.** Without one, every pod restart re-downloads
+~15-20GB of weights from scratch before it can serve a single request --
+several minutes of dead time on every restart, not just the first one. With
+a volume mounted at `/app/hf-cache`, that download happens exactly once
+across the pod's whole lifetime.
+
+## Known risks before the first real run
 
 I don't have a way to hit huggingface.co/tencent/Hunyuan3D-2mini from here to
 confirm the *exact* current subfolder name for the turbo checkpoint, and I
-can't run CUDA locally to test the pipeline end to end (this machine has no
-NVIDIA GPU). `server.py` tries three checkpoints in order (mini-turbo -> base
-turbo -> base) and logs which one it actually loaded, so a naming drift
+can't run CUDA locally to test the pipeline end to end (no NVIDIA GPU on the
+dev machine). `server.py` tries three checkpoints in order (mini-turbo ->
+base turbo -> base) and logs which one it actually loaded, so a naming drift
 degrades speed rather than crashing. **Read the container's startup logs on
 first deploy** -- if it fell back past the first candidate, open
 https://huggingface.co/tencent/Hunyuan3D-2mini and fix the subfolder string in
@@ -28,52 +53,27 @@ https://huggingface.co/tencent/Hunyuan3D-2mini and fix the subfolder string in
 
 Also unverified: the exact `pipeline(image=image)[0]` / `paint_pipeline(mesh,
 image=image)` call signatures match the Hunyuan3D-2 README pattern from
-memory. If the container throws on the first `/generate` call, `docker logs`
-will show the real signature error -- it's a one-line fix in `server.py`.
+memory. If the container throws on the first `/generate` call, the pod's
+logs will show the real signature error -- it's a one-line fix in
+`server.py`.
 
-## Build
+## Getting the image built
 
-From this directory:
+Push to `main` and the GitHub Actions workflow builds + pushes it
+automatically -- nothing to run locally. Requires two repo secrets already
+set up: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
 
-```bash
-docker build -t <dockerhub-username>/n8-speed:latest .
-```
+## RunPod pod settings
 
-This will download several tens of GB (PyTorch + model weights) and take a
-while -- it's a one-time cost per image version, not per container start.
-
-## Push to a registry
-
-Salad pulls from Docker Hub (or another registry). Simplest path to start:
-
-```bash
-docker login
-docker push <dockerhub-username>/n8-speed:latest
-```
-
-Use a **private** repo on Docker Hub once this is working (Salad supports
-private registries with credentials) so the baked-in weights/business logic
-aren't public. Public is fine for the first test.
-
-## Salad container group settings
-
-On the "Image Source" screen:
-
-- **What service are you using?** Docker Hub (or your chosen registry)
-- **Public or Private Registry?** Public to start, switch to Private + add
-  credentials once it works
-- **Image Name:** `<dockerhub-username>/n8-speed:latest`
-
-Rest of the container group:
-
-- GPU: RTX 5090 32GB
-- 8 vCPU / 16GB RAM / 100GB disk (your existing plan is fine)
-- Shared memory: 64MB default is fine -- this server doesn't use
-  multi-process DataLoader workers. Only raise it if you see shared-memory
-  errors in the logs.
-- Container Gateway: enabled, port **8000**
-- Health probe path: `/health`
-- Replicas: 1 to start
+- GPU: RTX 4090 24GB
+- **Volume:** mount a persistent volume at `/app/hf-cache` (matches
+  `HF_HOME` in the Dockerfile), sized for at least ~20GB of model weights
+  plus headroom.
+- Container image: `rayf24241/n8-speed:latest`
+- Expose port **8000** (HTTP)
+- Expect the *first* start after a fresh volume to take several extra
+  minutes while weights download -- that's normal, not a hang. Check logs
+  for download progress.
 
 ## API
 
@@ -96,12 +96,14 @@ Add `"texture": true` to also run the paint pipeline (slower, separate
 
 ## Next steps once this is live
 
-1. Deploy, watch startup logs for which shape checkpoint actually loaded.
-2. Hit `/generate` a few times, note real `shape_seconds` on the 5090 --
+1. Deploy with the volume mounted, watch startup logs for the weight
+   download and which shape checkpoint actually loaded.
+2. Hit `/generate` a few times, note real `shape_seconds` on the 4090 --
    that's your actual number against the 10s target, not a guess.
 3. If shape gen is still too slow, the first lever is inference steps on the
    shape pipeline (check `hy3dgen/shapegen` for a `num_inference_steps` /
-   `steps` kwarg) before considering a smaller/quantized checkpoint.
+   `steps` kwarg) before considering different hardware.
 4. Wire your website to `/generate` + poll `/status` + fetch `/result`.
-5. Add more replicas behind a router for real parallelism once one worker
-   isn't enough.
+5. Add more GPU workers behind a router for real parallelism once one
+   worker isn't enough -- remember `server.py`'s job state is in-process
+   memory, so this needs shared state (e.g. Redis) or sticky routing first.
