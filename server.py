@@ -136,10 +136,16 @@ def _run_job(job_id: str):
     mesh = shape_pipeline(
         image=image,
         # Defaults to 50 -- fine for the base checkpoint, but defeats the
-        # point of the mini-turbo checkpoint (few-step distilled, designed
-        # for ~5 steps). Starting guess; tune against the real number this
-        # logs.
-        num_inference_steps=5,
+        # point of the mini-turbo checkpoint (few-step distilled). 5 steps
+        # measured ~6.4-6.6s shape_seconds consistently but produces
+        # anatomy artifacts (confirmed live: a "dog" generation came out
+        # with two tails) -- trading speed for reliability by raising this.
+        # Rough estimate, not measured: shape_seconds bundles a step-
+        # dependent diffusion cost with a step-independent mesh-extraction
+        # cost we can't separate from here, so this number targets ~15s
+        # total assuming most of the increase scales with steps. Tune
+        # against the real number this logs.
+        num_inference_steps=12,
         # Defaults to 384. Confirmed via the pipeline source (Hunyuan3D-2's
         # own docs describe this as "a significant computational cost...
         # independent of diffusion step count") -- this, not step count, is
