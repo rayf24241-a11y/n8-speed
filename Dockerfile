@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu24.04
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -9,9 +9,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HUB_DISABLE_XET=1 \
     TORCH_CUDA_ARCH_LIST="8.6;8.9"
 
-# PIP_BREAK_SYSTEM_PACKAGES: Ubuntu 24.04 marks the system Python as
-# "externally managed" (PEP 668) and refuses bare `pip install`. There's no
-# real "system" to protect inside an isolated container, so this is safe here.
+# PIP_BREAK_SYSTEM_PACKAGES: harmless here (Ubuntu 22.04's pip predates the
+# PEP 668 "externally managed" restriction), kept in case that ever changes.
 
 # CUDA 12.4, not 12.8: originally targeted the RTX 5090 (Blackwell, needs
 # cuda>=12.8), but we're actually deploying on RTX 4090s on RunPod, and a
@@ -24,12 +23,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # 12.0 added back in -- don't try to make one image serve both, that's what
 # just broke.
 
+# Ubuntu 22.04, not 24.04: nvidia/cuda has no 12.4.x tag published for
+# 24.04 at all (confirmed against Docker Hub's tag list -- 24.04 starts at
+# 12.6). 22.04 ships Python 3.10 by default, which is why this uses plain
+# `python3` packages instead of a 3.12 PPA -- nothing here needs 3.12
+# specifically.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 python3.12-dev python3-pip python3-venv \
+        python3 python3-dev python3-pip python3-venv \
         git wget curl build-essential ninja-build \
         libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/python3.12 /usr/bin/python
+    && ln -sf /usr/bin/python3 /usr/bin/python
 
 WORKDIR /app
 
