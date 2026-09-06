@@ -23,7 +23,7 @@ from pathlib import Path
 
 # Update this every time you spin up a new pod -- RunPod pod IDs change on
 # every redeploy, so this is the one thing that needs editing between runs.
-N8_SPEED_URL = "https://r6o6ls8d6rzg6a-8000.proxy.runpod.net"
+N8_SPEED_URL = "https://70393g4our8ybu-8000.proxy.runpod.net"
 
 BLENDER_EXE = r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
 

@@ -40,6 +40,18 @@ txt2img = AutoPipelineForText2Image.from_pretrained(
     "stabilityai/sdxl-turbo", torch_dtype=torch.float16, variant="fp16"
 ).to("cuda")
 
+# Confirmed live: a plain prompt like "a dog" makes SDXL-Turbo generate a
+# natural photo -- dog standing on visible ground/floor, background context,
+# shadow -- and the shape pipeline then reconstructs 3D geometry for
+# *everything* in the image, floor included, since it has no concept of
+# "subject" vs "environment". Bias toward an isolated single object instead,
+# the same technique already used for prompt suffixing in
+# Hunyuan3D-Output\Generate-Model.ps1's GtagStyleSuffix.
+TEXT_TO_IMAGE_STYLE_SUFFIX = (
+    ", single isolated object, centered, plain white background, no floor, "
+    "no shadow, no ground, studio product photography, clean background"
+)
+
 
 def _load_shape_pipeline():
     """
@@ -108,7 +120,8 @@ def _run_job(job_id: str):
         image = Image.open(io.BytesIO(base64.b64decode(req.image_b64))).convert("RGB")
     elif req.prompt:
         t_img = time.time()
-        image = txt2img(prompt=req.prompt, num_inference_steps=1, guidance_scale=0.0).images[0]
+        full_prompt = req.prompt + TEXT_TO_IMAGE_STYLE_SUFFIX
+        image = txt2img(prompt=full_prompt, num_inference_steps=1, guidance_scale=0.0).images[0]
         image_seconds = time.time() - t_img
     else:
         raise ValueError("Provide either 'prompt' or 'image_b64'")
