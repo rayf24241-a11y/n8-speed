@@ -61,7 +61,14 @@ def _load_shape_pipeline():
             print(f"Loading shape model {repo_id}/{subfolder} ...", flush=True)
             pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(repo_id, subfolder=subfolder)
             print(f"  -> loaded {repo_id}/{subfolder}", flush=True)
-            return pipe.to("cuda")
+            # Confirmed on a real deploy: this pipeline's .to() mutates in
+            # place and returns None (unlike torch.nn.Module.to(), which
+            # returns self) -- `return pipe.to("cuda")` was silently
+            # returning None, so every /generate call failed with
+            # "'NoneType' object is not callable" at the shape_pipeline(...)
+            # call site, despite the startup logs claiming success.
+            pipe.to("cuda")
+            return pipe
         except Exception as e:  # noqa: BLE001
             print(f"  -> failed ({e}); trying next candidate", flush=True)
             last_err = e
