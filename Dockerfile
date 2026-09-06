@@ -42,6 +42,17 @@ RUN pip install --no-cache-dir torch torchvision --index-url https://download.py
 # --- Hunyuan3D-2 (shape + texture pipelines) ---
 RUN git clone --depth 1 https://github.com/Tencent/Hunyuan3D-2.git /app/Hunyuan3D-2
 WORKDIR /app/Hunyuan3D-2
+
+# The paint pipeline's own code calls DiffusionPipeline.from_pretrained()
+# internally without trust_remote_code=True, so diffusers refuses to
+# execute hunyuanpaint's custom pipeline.py -- confirmed on a real deploy:
+# "ValueError: ... contains custom code in pipeline.py which must be
+# executed ... Pass trust_remote_code=True". Patch every call site in the
+# repo rather than just the one that's crashed so far, since the paint
+# pipeline loads multiple sub-models this same way.
+RUN grep -rl "DiffusionPipeline.from_pretrained(" hy3dgen/ | \
+    xargs -r sed -i 's/DiffusionPipeline\.from_pretrained(/DiffusionPipeline.from_pretrained(trust_remote_code=True, /g'
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Compiled CUDA extensions the texture pipeline needs (rasterizer + renderer).
