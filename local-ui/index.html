@@ -251,6 +251,22 @@ function triggerDownload(url, filename) {
   a.remove();
 }
 
+// fetch().json() throws a cryptic "Unexpected end of JSON input" when the
+// RunPod pod is mid-redeploy or deleted (empty/non-JSON response body from
+// RunPod's own proxy, not from N8 Speed itself) -- surface something
+// actionable instead of the raw parse error.
+async function safeJson(resp) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Server unreachable or restarting (HTTP ${resp.status}). ` +
+      `Check that the RunPod pod is up and N8_SPEED_URL in server.py points at it.`
+    );
+  }
+}
+
 downloadBtn.addEventListener('click', async () => {
   if (!currentJobId) return;
   const fmt = formatSelect.value;
@@ -265,7 +281,7 @@ downloadBtn.addEventListener('click', async () => {
   try {
     const resp = await fetch(`/api/result/${currentJobId}?format=fbx`);
     if (!resp.ok) {
-      const err = await resp.json();
+      const err = await safeJson(resp);
       throw new Error(err.error || 'FBX conversion failed');
     }
     const blob = await resp.blob();
@@ -327,7 +343,7 @@ generateBtn.addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const genData = await genResp.json();
+    const genData = await safeJson(genResp);
     if (!genResp.ok) throw new Error(genData.error || 'Failed to queue job');
 
     setStatus(genData.message + (genData.queue_position > 1 ? ` (position ${genData.queue_position})` : ''));
@@ -338,7 +354,7 @@ generateBtn.addEventListener('click', async () => {
     while (true) {
       await new Promise(r => setTimeout(r, 1000));
       const statusResp = await fetch(`/api/status/${jobId}`);
-      const statusData = await statusResp.json();
+      const statusData = await safeJson(statusResp);
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
       if (statusData.status === 'error') {
