@@ -100,9 +100,18 @@ def _prompt_is_flagged(prompt: str) -> bool:
 # "subject" vs "environment". Bias toward an isolated single object instead,
 # the same technique already used for prompt suffixing in
 # Hunyuan3D-Output\Generate-Model.ps1's GtagStyleSuffix.
+#
+# Confirmed live again: "a man" with only the floor/background suffix still
+# generated a man sitting in a chair -- rembg doesn't strip that, since a
+# chair someone is sitting on is contiguous with the foreground subject in
+# the alpha mask, not "background" in any sense it can detect. Same for the
+# largest-connected-component mesh cleanup: a chair fused to a seated
+# figure is one connected component, not separable debris. The only real
+# fix is stopping the prop from being generated in the first place.
 TEXT_TO_IMAGE_STYLE_SUFFIX = (
     ", single isolated object, centered, plain white background, no floor, "
-    "no shadow, no ground, studio product photography, clean background"
+    "no shadow, no ground, studio product photography, clean background, "
+    "no props, no furniture, no accessories, no other objects, nothing else in frame"
 )
 
 

@@ -102,6 +102,15 @@ since the shape model has no "subject vs. environment" concept and needs
 the background already gone. `server.py` now does the same for every image,
 uploaded or generated.
 
+Confirmed live yet again: "a man" generated a man sitting in a chair, and
+neither rembg nor the largest-component mesh cleanup touched it -- a chair
+someone is sitting on is contiguous with the subject in both the alpha mask
+and the mesh topology, not separable background or debris. The only real
+fix is stopping the prop from being generated at all: `TEXT_TO_IMAGE_STYLE_SUFFIX`
+now also says "no props, no furniture, no accessories, no other objects,
+nothing else in frame". This only helps the text-prompt path (SDXL-Turbo
+image) -- an uploaded photo with a chair in it has no such backstop.
+
 Quality settings were also raised: shape `num_inference_steps` 12 -> 25,
 SDXL-Turbo 1 -> 2 steps. `octree_resolution` was raised 256 -> 384 and then
 **reverted back to 256** -- confirmed live that 384 isn't just slower on
