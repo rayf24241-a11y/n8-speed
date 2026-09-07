@@ -87,6 +87,17 @@
     color: var(--dim);
   }
 
+  .cost-estimate {
+    margin-top: 14px;
+    padding: 10px 12px;
+    background: #0e1016;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--dim);
+  }
+  .cost-estimate b { color: var(--good); font-size: 15px; }
+
   button.generate {
     width: 100%;
     margin-top: 20px;
@@ -204,6 +215,11 @@
       <label for="texture" style="margin:0">Also generate texture (slower)</label>
     </div>
 
+    <label for="polyCount">Target polygon count: <b id="polyCountVal" style="color:var(--text)">40,000</b></label>
+    <input type="range" id="polyCount" min="1000" max="200000" step="1000" value="40000" style="width:100%; accent-color:var(--accent)">
+
+    <div class="cost-estimate" id="costEstimate"></div>
+
     <button class="generate" id="generateBtn">Generate</button>
 
     <div class="status" id="status"></div>
@@ -229,6 +245,9 @@ const fileInput = document.getElementById('fileInput');
 const fileLabel = document.getElementById('fileLabel');
 const clearFileBtn = document.getElementById('clearFileBtn');
 const textureEl = document.getElementById('texture');
+const polyCountEl = document.getElementById('polyCount');
+const polyCountValEl = document.getElementById('polyCountVal');
+const costEstimateEl = document.getElementById('costEstimate');
 const generateBtn = document.getElementById('generateBtn');
 const statusEl = document.getElementById('status');
 const timingEl = document.getElementById('timing');
@@ -241,6 +260,30 @@ const downloadBtn = document.getElementById('downloadBtn');
 let imageB64 = null;
 let currentJobId = null;
 let glbBlobUrl = null;
+
+// Mirrors N8 Speed's real pricing (Image->3D $0.05 / Text->3D $0.10 / +Texture
+// $0.10) plus a poly-count premium scaled across the slider's full range, so
+// testers can see roughly what a real customer would be charged for these
+// settings. This estimate is for-test only -- nothing here is actually billed.
+const POLY_MIN = Number(polyCountEl.min);
+const POLY_MAX = Number(polyCountEl.max);
+const POLY_PREMIUM_MAX = 0.10;
+
+function estimateCost() {
+  let cost = imageB64 ? 0.05 : 0.10;
+  if (textureEl.checked) cost += 0.10;
+  const polyFrac = (Number(polyCountEl.value) - POLY_MIN) / (POLY_MAX - POLY_MIN);
+  cost += polyFrac * POLY_PREMIUM_MAX;
+  return cost;
+}
+
+function updateCostEstimate() {
+  polyCountValEl.textContent = Number(polyCountEl.value).toLocaleString();
+  costEstimateEl.innerHTML = `Estimated cost: <b>$${estimateCost().toFixed(2)}</b> (for test)`;
+}
+
+polyCountEl.addEventListener('input', updateCostEstimate);
+textureEl.addEventListener('change', updateCostEstimate);
 
 function triggerDownload(url, filename) {
   const a = document.createElement('a');
@@ -300,7 +343,7 @@ fileInput.addEventListener('change', () => {
   fileLabel.textContent = f.name;
   clearFileBtn.style.display = 'inline-block';
   const reader = new FileReader();
-  reader.onload = () => { imageB64 = reader.result.split(',')[1]; };
+  reader.onload = () => { imageB64 = reader.result.split(',')[1]; updateCostEstimate(); };
   reader.readAsDataURL(f);
 });
 
@@ -309,7 +352,10 @@ clearFileBtn.addEventListener('click', () => {
   imageB64 = null;
   fileLabel.textContent = 'No file chosen';
   clearFileBtn.style.display = 'none';
+  updateCostEstimate();
 });
+
+updateCostEstimate();
 
 function setStatus(text, cls) {
   statusEl.textContent = text;
@@ -317,7 +363,7 @@ function setStatus(text, cls) {
 }
 
 generateBtn.addEventListener('click', async () => {
-  const body = { texture: textureEl.checked };
+  const body = { texture: textureEl.checked, target_faces: Number(polyCountEl.value) };
   if (imageB64) {
     body.image_b64 = imageB64;
   } else if (promptEl.value.trim()) {
@@ -371,6 +417,7 @@ generateBtn.addEventListener('click', async () => {
           <div>Cleanup: <b>${statusData.cleanup_seconds}s</b></div>
           <div>Texture: <b>${statusData.texture_seconds}s</b></div>
           <div>Export: <b>${statusData.export_seconds}s</b></div>
+          <div>Faces: <b>${statusData.face_count.toLocaleString()}</b></div>
           <div class="total">Server total: ${statusData.total_seconds}s</div>
         `;
 

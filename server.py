@@ -10,6 +10,7 @@ container instead of adding concurrency inside one of them.
 """
 import base64
 import io
+import os
 import queue
 import threading
 import time
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
@@ -28,6 +29,22 @@ OUTPUT_DIR = Path("/app/outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="N8 Speed")
+
+# Every real, billable endpoint sits behind this -- otherwise the RunPod proxy
+# URL alone is the entire access control, and anyone who finds it can queue
+# unlimited paid-tier generations for free. Deliberately fail CLOSED: if
+# N8_SPEED_API_KEY isn't set on the pod, every gated request is refused
+# rather than silently left open, so a missed env var can't quietly disable
+# auth the way it could with a fail-open check. /health stays ungated -- it
+# leaks no capability and needs to work for external uptime monitoring.
+API_KEY = os.environ.get("N8_SPEED_API_KEY")
+
+
+def require_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+    if not API_KEY:
+        raise HTTPException(500, "Server misconfigured: N8_SPEED_API_KEY not set")
+    if x_api_key != API_KEY:
+        raise HTTPException(401, "Missing or invalid X-API-Key header")
 
 # ---------------------------------------------------------------------------
 # Model loading (once, at process startup)
@@ -187,11 +204,29 @@ def _ai_review_image(image: Image.Image):
 # that was actually legible in that 2D image. Biasing the prompt toward a
 # sharp, well-defined face gives the shape model something real to work
 # from instead of a blurry approximation.
+#
+# Confirmed live and reproducible: the literal prompt "a man" reliably
+# generated a crouching figure reaching toward a box, hands fused into one
+# blob where they met near the ground. Two contributing causes, both from
+# the 2D reference image, not the shape model: (1) nothing biased the pose
+# toward standing, so SDXL-Turbo picked a crouch-and-reach pose where the
+# two hands overlap in the 2D image -- the shape model then has no depth
+# information to separate what already reads as one shape; (2) hands are
+# small, fine detail exactly like faces above, so the same blur/garbling
+# problem applies to fingers. Same fix as the face case: bias toward a pose
+# and rendering where hands are unambiguous. Note guidance_scale=0.0 below
+# means the model doesn't follow this prompt tightly (that's Turbo's
+# intended, recommended setting), so this reduces the failure rate, it
+# doesn't eliminate it -- fused hands are a known hard limitation of
+# single-image 3D reconstruction generally, not something a prompt alone
+# fully solves.
 TEXT_TO_IMAGE_STYLE_SUFFIX = (
     ", single isolated object, centered, plain white background, no floor, "
     "no shadow, no ground, studio product photography, clean background, "
     "no props, no furniture, no accessories, no other objects, nothing else in frame, "
     "full body, full-length, entire body visible from head to feet, "
+    "standing upright, arms relaxed at sides, hands away from each other and away from the body, "
+    "hands and fingers clearly separated and distinct, not touching, not overlapping, not fused together, "
     "detailed face, sharp facial features, clear eyes, well-defined face, high detail"
 )
 
@@ -281,13 +316,39 @@ jobs: dict = {}
 jobs_lock = threading.Lock()
 
 
+MIN_TARGET_FACES = 1000
+MAX_TARGET_FACES = 200000
+
+
 class GenerateRequest(BaseModel):
     prompt: Optional[str] = None
     image_b64: Optional[str] = None
     texture: bool = False
+    # Caps the exported mesh's triangle count via post-generation decimation
+    # (does not change shape-generation cost -- octree_resolution is what
+    # drives that). None = no cap, keep the raw marching-cubes output.
+    target_faces: Optional[int] = None
+
+
+OUTPUT_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
+def _sweep_old_outputs():
+    # Nothing ever deleted these -- every generated .glb sat on the pod's
+    # disk forever. Runs once per job (cheap: a single directory listing)
+    # instead of on a separate timer, since the worker thread is already the
+    # one serialization point for everything this process does.
+    cutoff = time.time() - OUTPUT_MAX_AGE_SECONDS
+    for f in OUTPUT_DIR.glob("*.glb"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
 
 
 def _run_job(job_id: str):
+    _sweep_old_outputs()
     job = jobs[job_id]
     req: GenerateRequest = job["request"]
 
@@ -297,12 +358,12 @@ def _run_job(job_id: str):
     elif req.prompt:
         t_img = time.time()
         full_prompt = req.prompt + TEXT_TO_IMAGE_STYLE_SUFFIX
-        # Raised from 2: SDXL-Turbo supports up to ~4 steps at
-        # guidance_scale=0 and each step is cheap (well under 1s total
-        # either way). Faces are the most step-starved detail in a fast
-        # generation -- more steps means less blur/garbling in exactly the
-        # feature the shape model most needs a clean source image for.
-        image = txt2img(prompt=full_prompt, num_inference_steps=4, guidance_scale=0.0).images[0]
+        # Raised from 4: same reasoning as the earlier 2->4 bump, extended
+        # to hands -- confirmed live that fused-hands failures trace back to
+        # small/blurry finger detail in the 2D reference image, the same
+        # step-starvation problem faces had. Each step is still well under
+        # 1s, so this adds a small fraction of a second, not a real cost.
+        image = txt2img(prompt=full_prompt, num_inference_steps=6, guidance_scale=0.0).images[0]
         image_seconds = time.time() - t_img
     else:
         raise ValueError("Provide either 'prompt' or 'image_b64'")
@@ -372,6 +433,16 @@ def _run_job(job_id: str):
         mesh = max(components, key=lambda m: len(m.vertices))
     cleanup_seconds = time.time() - t_clean
 
+    # User-requested polycount cap. Runs before the texture-only 40k safety
+    # cap below (that one exists purely to keep xatlas fast, not for quality
+    # control) so a request already at or under 40k also speeds up texturing
+    # for free instead of decimating twice.
+    decimate_seconds = 0.0
+    if req.target_faces and len(mesh.faces) > req.target_faces:
+        t_decimate = time.time()
+        mesh = mesh.simplify_quadric_decimation(face_count=req.target_faces)
+        decimate_seconds = time.time() - t_decimate
+
     simplify_seconds = 0.0
     texture_seconds = 0.0
     if req.texture:
@@ -413,12 +484,14 @@ def _run_job(job_id: str):
         job["rembg_seconds"] = round(rembg_seconds, 2)
         job["shape_seconds"] = round(shape_seconds, 2)
         job["cleanup_seconds"] = round(cleanup_seconds, 2)
+        job["decimate_seconds"] = round(decimate_seconds, 2)
         job["simplify_seconds"] = round(simplify_seconds, 2)
         job["texture_seconds"] = round(texture_seconds, 2)
         job["export_seconds"] = round(export_seconds, 2)
+        job["face_count"] = len(mesh.faces)
         job["total_seconds"] = round(
             image_seconds + review_seconds + rembg_seconds + shape_seconds
-            + cleanup_seconds + simplify_seconds + texture_seconds + export_seconds, 2
+            + cleanup_seconds + decimate_seconds + simplify_seconds + texture_seconds + export_seconds, 2
         )
 
 
@@ -444,12 +517,16 @@ threading.Thread(target=worker_loop, daemon=True).start()
 # ---------------------------------------------------------------------------
 
 
-@app.post("/generate")
+@app.post("/generate", dependencies=[Depends(require_api_key)])
 def generate(req: GenerateRequest):
     if not req.prompt and not req.image_b64:
         raise HTTPException(400, "Provide 'prompt' or 'image_b64'")
     if req.prompt and _prompt_is_flagged(req.prompt):
         raise HTTPException(400, "Prompt rejected: inappropriate content is not allowed.")
+    if req.target_faces is not None and not (MIN_TARGET_FACES <= req.target_faces <= MAX_TARGET_FACES):
+        raise HTTPException(
+            400, f"target_faces must be between {MIN_TARGET_FACES} and {MAX_TARGET_FACES}"
+        )
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
@@ -465,7 +542,7 @@ def generate(req: GenerateRequest):
     return {"job_id": job_id, "queue_position": position, "message": message}
 
 
-@app.get("/status/{job_id}")
+@app.get("/status/{job_id}", dependencies=[Depends(require_api_key)])
 def status(job_id: str):
     with jobs_lock:
         job = jobs.get(job_id)
@@ -478,16 +555,18 @@ def status(job_id: str):
         resp["rembg_seconds"] = job["rembg_seconds"]
         resp["shape_seconds"] = job["shape_seconds"]
         resp["cleanup_seconds"] = job["cleanup_seconds"]
+        resp["decimate_seconds"] = job["decimate_seconds"]
         resp["simplify_seconds"] = job["simplify_seconds"]
         resp["texture_seconds"] = job["texture_seconds"]
         resp["export_seconds"] = job["export_seconds"]
+        resp["face_count"] = job["face_count"]
         resp["total_seconds"] = job["total_seconds"]
     if job["status"] == "error":
         resp["error"] = job["error"]
     return resp
 
 
-@app.get("/result/{job_id}")
+@app.get("/result/{job_id}", dependencies=[Depends(require_api_key)])
 def result(job_id: str):
     with jobs_lock:
         job = jobs.get(job_id)

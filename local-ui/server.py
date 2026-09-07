@@ -23,7 +23,11 @@ from pathlib import Path
 
 # Update this every time you spin up a new pod -- RunPod pod IDs change on
 # every redeploy, so this is the one thing that needs editing between runs.
-N8_SPEED_URL = "https://0pcaq4vahzqzqn-8000.proxy.runpod.net"
+N8_SPEED_URL = "https://6x7ydqgjssccay-8000.proxy.runpod.net"
+
+# Must match N8_SPEED_API_KEY set as an env var on the pod itself -- server.py
+# now rejects /generate, /status, /result without this header.
+N8_SPEED_API_KEY = "39daacafe5b495249cd91eed5864fe2be0c772a2bc835b999d4fdef2c9f2fc8c"
 
 BLENDER_EXE = r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
 
@@ -41,6 +45,7 @@ class Handler(BaseHTTPRequestHandler):
         # affected since it isn't on that blocklist, which is why direct
         # curl testing never surfaced this.
         req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        req.add_header("X-API-Key", N8_SPEED_API_KEY)
         if body is not None:
             req.add_header("Content-Type", "application/json")
         try:
