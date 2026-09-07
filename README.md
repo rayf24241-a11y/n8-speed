@@ -146,6 +146,22 @@ error (an issue in this quality layer shouldn't take down generation
 entirely when the hard safety gates already ran). Reported as
 `review_seconds` in `/status`.
 
+**Incident, fixed:** the very first deploy of this crashed the ENTIRE
+server at import time -- `AttributeError: 'HfMoondream' object has no
+attribute 'all_tied_weights_keys'` -- a version mismatch between
+moondream2's custom modeling code and transformers' `device_map`-based
+loading path (`caching_allocator_warmup` expects a newer interface the
+custom code doesn't implement). Not a "the reviewer doesn't work" bug --
+the whole container crash-looped and never served a single request. Fixed
+two ways: (1) load without `device_map`, `.to("cuda")` afterward instead
+-- the same pattern every other model in this file already uses, which
+skips the code path that crashed; (2) wrapped the load itself in
+try/except, `reviewer_model = None` on failure, `_ai_review_image()`
+no-ops when it's `None`. That second part is the actually important fix --
+an optional add-on layer must never be able to take the whole service down
+again, regardless of whether this specific fix holds up against some
+future transformers version too.
+
 **Known limitation, not fixed:** multi-subject prompts like "a girl and a
 man" aren't well supported. `TEXT_TO_IMAGE_STYLE_SUFFIX` says "single
 isolated object" on purpose -- that's the same bias that stops floor/props

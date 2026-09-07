@@ -106,9 +106,28 @@ from transformers import AutoModelForCausalLM  # noqa: E402
 # problems instead of needing a dedicated model trained per problem. Runs
 # self-hosted on this same GPU (no external API key), ~2GB VRAM, sub-second
 # per query.
-reviewer_model = AutoModelForCausalLM.from_pretrained(
-    "vikhyatk/moondream2", revision="2025-06-21", trust_remote_code=True, device_map={"": "cuda"}
-)
+#
+# Confirmed live: loading this with device_map={"": "cuda"} crashed the
+# ENTIRE server at import time -- "AttributeError: 'HfMoondream' object has
+# no attribute 'all_tied_weights_keys'", a version mismatch between
+# moondream2's custom modeling code and transformers' device-map loading
+# path (caching_allocator_warmup expects a newer interface the custom code
+# doesn't implement). Loading without device_map and moving to cuda
+# afterward -- the same pattern already used for every other model in this
+# file -- skips that code path entirely. Also wrapped in try/except: this
+# is an optional add-on layer, and a load failure here (this one or any
+# future transformers/model version mismatch) must never be able to take
+# the whole service down the way it just did. reviewer_model is None when
+# unavailable; _ai_review_image() no-ops in that case.
+reviewer_model = None
+try:
+    reviewer_model = AutoModelForCausalLM.from_pretrained(
+        "vikhyatk/moondream2", revision="2025-06-21", trust_remote_code=True
+    ).to("cuda")
+    print("  -> content reviewer loaded", flush=True)
+except Exception:  # noqa: BLE001
+    traceback.print_exc()
+    print("  -> content reviewer failed to load; continuing without it", flush=True)
 
 REVIEWER_QUESTION = (
     "Look at this image carefully and check for problems. Answer with exactly "
@@ -125,10 +144,13 @@ def _ai_review_image(image: Image.Image):
     """
     Runs AFTER the keyword filter and NSFW classifier, not instead of them --
     this is a generalist model, not a substitute for a dedicated classifier
-    on the highest-stakes (safety) check. Fails open on an unexpected error:
-    an issue in this quality layer shouldn't take down generation entirely
-    when the hard safety gates above already ran.
+    on the highest-stakes (safety) check. Fails open on an unexpected error
+    (including the model never having loaded in the first place): an issue
+    in this quality layer shouldn't take down generation entirely when the
+    hard safety gates above already ran.
     """
+    if reviewer_model is None:
+        return
     try:
         answer = reviewer_model.query(image, REVIEWER_QUESTION)["answer"]
     except Exception:  # noqa: BLE001
