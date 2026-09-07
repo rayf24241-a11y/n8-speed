@@ -128,6 +128,13 @@ connected 3D blob, not two separate models. There's no good fix for this
 within the current one-image-in/one-mesh-out design -- generate each
 subject as its own separate `/generate` call instead.
 
+**Face quality:** faces are the hardest detail for both stages -- SDXL-Turbo
+at very few steps blurs/garbles fine facial features, and the shape model
+can only reconstruct what was legible in that source image. Raised
+SDXL-Turbo `num_inference_steps` 2 -> 4 (still well under 1s) and added
+"detailed face, sharp facial features, clear eyes, well-defined face, high
+detail" to `TEXT_TO_IMAGE_STYLE_SUFFIX`.
+
 Quality settings were also raised: shape `num_inference_steps` 12 -> 25,
 SDXL-Turbo 1 -> 2 steps. `octree_resolution` was raised 256 -> 384 and then
 **reverted back to 256** -- confirmed live that 384 isn't just slower on

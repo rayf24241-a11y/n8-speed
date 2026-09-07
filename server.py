@@ -114,11 +114,18 @@ def _prompt_is_flagged(prompt: str) -> bool:
 # toward a head-and-shoulders portrait crop, so the 2D image itself likely
 # never had legs in frame in the first place; the shape model can't
 # reconstruct what it never saw. Added explicit full-body framing language.
+# Faces are the hardest thing for both stages to get right: SDXL-Turbo at
+# very few steps tends to blur or garble fine facial detail in the source
+# image, and the shape model can only reconstruct 3D geometry for detail
+# that was actually legible in that 2D image. Biasing the prompt toward a
+# sharp, well-defined face gives the shape model something real to work
+# from instead of a blurry approximation.
 TEXT_TO_IMAGE_STYLE_SUFFIX = (
     ", single isolated object, centered, plain white background, no floor, "
     "no shadow, no ground, studio product photography, clean background, "
     "no props, no furniture, no accessories, no other objects, nothing else in frame, "
-    "full body, full-length, entire body visible from head to feet"
+    "full body, full-length, entire body visible from head to feet, "
+    "detailed face, sharp facial features, clear eyes, well-defined face, high detail"
 )
 
 
@@ -223,10 +230,12 @@ def _run_job(job_id: str):
     elif req.prompt:
         t_img = time.time()
         full_prompt = req.prompt + TEXT_TO_IMAGE_STYLE_SUFFIX
-        # 2 steps, not 1: SDXL-Turbo supports up to ~4 steps at
-        # guidance_scale=0 and each step is cheap -- a small quality bump
-        # for close to free.
-        image = txt2img(prompt=full_prompt, num_inference_steps=2, guidance_scale=0.0).images[0]
+        # Raised from 2: SDXL-Turbo supports up to ~4 steps at
+        # guidance_scale=0 and each step is cheap (well under 1s total
+        # either way). Faces are the most step-starved detail in a fast
+        # generation -- more steps means less blur/garbling in exactly the
+        # feature the shape model most needs a clean source image for.
+        image = txt2img(prompt=full_prompt, num_inference_steps=4, guidance_scale=0.0).images[0]
         image_seconds = time.time() - t_img
     else:
         raise ValueError("Provide either 'prompt' or 'image_b64'")
