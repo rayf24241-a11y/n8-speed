@@ -93,6 +93,51 @@ def _prompt_is_flagged(prompt: str) -> bool:
     return any(term in lowered for term in BANNED_PROMPT_TERMS)
 
 
+print("Loading content reviewer (moondream2)...", flush=True)
+from transformers import AutoModelForCausalLM  # noqa: E402
+
+# The keyword filter and NSFW classifier above can only catch what they were
+# specifically built for -- neither has any concept of "is there a chair in
+# this shot" or "is the whole body visible". Every one of those composition
+# bugs this session (chair, legless man, headless monkey) got caught by a
+# human testing it and reported back one at a time. moondream2 is a small
+# (~2B) self-hosted vision-language model -- actual reasoning over the
+# image, not a narrow classifier -- that can be ASKED about arbitrary
+# problems instead of needing a dedicated model trained per problem. Runs
+# self-hosted on this same GPU (no external API key), ~2GB VRAM, sub-second
+# per query.
+reviewer_model = AutoModelForCausalLM.from_pretrained(
+    "vikhyatk/moondream2", revision="2025-06-21", trust_remote_code=True, device_map={"": "cuda"}
+)
+
+REVIEWER_QUESTION = (
+    "Look at this image carefully and check for problems. Answer with exactly "
+    "one word first -- PASS or FAIL -- then a short reason on the same line. "
+    "FAIL if ANY of these are true: the image contains nudity, sexual content, "
+    "or graphic violence; there is more than one person or animal subject; the "
+    "subject's body is cut off and not fully visible from head to feet; there "
+    "is a chair, furniture, or any other object besides the single subject. "
+    "Otherwise answer PASS."
+)
+
+
+def _ai_review_image(image: Image.Image):
+    """
+    Runs AFTER the keyword filter and NSFW classifier, not instead of them --
+    this is a generalist model, not a substitute for a dedicated classifier
+    on the highest-stakes (safety) check. Fails open on an unexpected error:
+    an issue in this quality layer shouldn't take down generation entirely
+    when the hard safety gates above already ran.
+    """
+    try:
+        answer = reviewer_model.query(image, REVIEWER_QUESTION)["answer"]
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return
+    if answer.strip().upper().startswith("FAIL"):
+        raise ValueError(f"Image flagged by content reviewer: {answer.strip()}")
+
+
 # Confirmed live: a plain prompt like "a dog" makes SDXL-Turbo generate a
 # natural photo -- dog standing on visible ground/floor, background context,
 # shadow -- and the shape pipeline then reconstructs 3D geometry for
@@ -245,6 +290,10 @@ def _run_job(job_id: str):
     # that filter still has to produce an actual image, which lands here.
     _check_image_safety(image)
 
+    t_review = time.time()
+    _ai_review_image(image)
+    review_seconds = time.time() - t_review
+
     # Confirmed against Hunyuan3D-2's own gradio_app.py: it runs every RGB
     # image through background removal before shape generation, unconditionally.
     # Applies to BOTH paths -- an uploaded photo has a real background to
@@ -332,6 +381,7 @@ def _run_job(job_id: str):
         job["status"] = "done"
         job["result_path"] = str(out_path)
         job["image_seconds"] = round(image_seconds, 2)
+        job["review_seconds"] = round(review_seconds, 2)
         job["rembg_seconds"] = round(rembg_seconds, 2)
         job["shape_seconds"] = round(shape_seconds, 2)
         job["cleanup_seconds"] = round(cleanup_seconds, 2)
@@ -339,8 +389,8 @@ def _run_job(job_id: str):
         job["texture_seconds"] = round(texture_seconds, 2)
         job["export_seconds"] = round(export_seconds, 2)
         job["total_seconds"] = round(
-            image_seconds + rembg_seconds + shape_seconds + cleanup_seconds
-            + simplify_seconds + texture_seconds + export_seconds, 2
+            image_seconds + review_seconds + rembg_seconds + shape_seconds
+            + cleanup_seconds + simplify_seconds + texture_seconds + export_seconds, 2
         )
 
 
@@ -396,6 +446,7 @@ def status(job_id: str):
     resp = {"status": job["status"]}
     if job["status"] == "done":
         resp["image_seconds"] = job["image_seconds"]
+        resp["review_seconds"] = job["review_seconds"]
         resp["rembg_seconds"] = job["rembg_seconds"]
         resp["shape_seconds"] = job["shape_seconds"]
         resp["cleanup_seconds"] = job["cleanup_seconds"]

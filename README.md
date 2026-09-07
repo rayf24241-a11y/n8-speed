@@ -118,6 +118,34 @@ never had legs in it, so the shape model had nothing to reconstruct. Added
 "full body, full-length, entire body visible from head to feet" to the
 suffix.
 
+## Content review: a real reasoning model, not another narrow classifier
+
+Every composition bug this session (chair fused to a seated figure, a
+legless man, a headless-crop monkey) was found by manual testing, reported
+one at a time, and fixed with a one-off prompt tweak. The keyword filter and
+NSFW classifier can only catch what they were specifically built for --
+neither has any concept of "is there a chair in this shot" or "is the whole
+body visible", so a new failure mode always needs a human to notice it
+first.
+
+`_ai_review_image()` in `server.py` adds `vikhyatk/moondream2`, a small
+(~2B parameter) self-hosted vision-language model, as a generalist reviewer
+run on every image (uploaded or generated) right after the NSFW classifier.
+Unlike the classifiers above, it can be *asked* about a problem in plain
+language instead of needing a dedicated model trained per problem -- the
+same question also checks for extra objects, multiple subjects, and
+cut-off bodies, catching a case even if nobody has told the prompt suffix
+to avoid it yet. Runs self-hosted on this same GPU: no external API key,
+~2GB VRAM, sub-second per query, zero new pip dependencies (only needs
+`torch`/`transformers`/`pillow`, all already installed).
+
+This does **not** replace the NSFW classifier or keyword filter -- it's a
+generalist model, not a substitute for a dedicated one on the highest-stakes
+check. It runs as an additional layer, and fails open on an unexpected
+error (an issue in this quality layer shouldn't take down generation
+entirely when the hard safety gates already ran). Reported as
+`review_seconds` in `/status`.
+
 **Known limitation, not fixed:** multi-subject prompts like "a girl and a
 man" aren't well supported. `TEXT_TO_IMAGE_STYLE_SUFFIX` says "single
 isolated object" on purpose -- that's the same bias that stops floor/props
