@@ -218,6 +218,14 @@
     <label for="polyCount">Target polygon count: <b id="polyCountVal" style="color:var(--text)">40,000</b></label>
     <input type="range" id="polyCount" min="1000" max="200000" step="1000" value="40000" style="width:100%; accent-color:var(--accent)">
 
+    <label for="planSelect">Plan (test -- controls queue priority)</label>
+    <select id="planSelect" style="width:100%; background:#0e1016; border:1px solid var(--border); border-radius:8px; color:var(--text); padding:10px 12px; font-size:14px;">
+      <option value="free">Free</option>
+      <option value="pro">Pro</option>
+      <option value="business">Business</option>
+      <option value="pro_plus">Pro+</option>
+    </select>
+
     <div class="cost-estimate" id="costEstimate"></div>
 
     <button class="generate" id="generateBtn">Generate</button>
@@ -247,6 +255,7 @@ const clearFileBtn = document.getElementById('clearFileBtn');
 const textureEl = document.getElementById('texture');
 const polyCountEl = document.getElementById('polyCount');
 const polyCountValEl = document.getElementById('polyCountVal');
+const planSelectEl = document.getElementById('planSelect');
 const costEstimateEl = document.getElementById('costEstimate');
 const generateBtn = document.getElementById('generateBtn');
 const statusEl = document.getElementById('status');
@@ -363,7 +372,7 @@ function setStatus(text, cls) {
 }
 
 generateBtn.addEventListener('click', async () => {
-  const body = { texture: textureEl.checked, target_faces: Number(polyCountEl.value) };
+  const body = { texture: textureEl.checked, target_faces: Number(polyCountEl.value), plan: planSelectEl.value };
   if (imageB64) {
     body.image_b64 = imageB64;
   } else if (promptEl.value.trim()) {

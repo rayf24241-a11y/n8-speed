@@ -311,7 +311,27 @@ print("N8 Speed ready.", flush=True)
 # Single-worker job queue
 # ---------------------------------------------------------------------------
 
-job_queue: "queue.Queue[str]" = queue.Queue()
+# A PriorityQueue, not a plain FIFO Queue: there's exactly one GPU and one
+# worker thread (see module docstring), so queue order is the only lever
+# for "who gets served faster" -- no amount of code changes speeds up any
+# individual generation once it's actually running. Lower number = served
+# first. The counter is a tiebreaker so equal-priority jobs still resolve
+# in arrival order (PriorityQueue compares tuples element-wise, and two
+# jobs queued in the same instant would otherwise have nothing else to
+# compare -- job_id strings are orderable but that's not the same as FIFO).
+PLAN_PRIORITY = {"pro_plus": 0, "business": 1, "pro": 2, "free": 3}
+_job_counter_lock = threading.Lock()
+_job_counter = 0
+
+
+def _next_job_seq() -> int:
+    global _job_counter
+    with _job_counter_lock:
+        _job_counter += 1
+        return _job_counter
+
+
+job_queue: "queue.PriorityQueue" = queue.PriorityQueue()
 jobs: dict = {}
 jobs_lock = threading.Lock()
 
@@ -328,6 +348,13 @@ class GenerateRequest(BaseModel):
     # (does not change shape-generation cost -- octree_resolution is what
     # drives that). None = no cap, keep the raw marching-cubes output.
     target_faces: Optional[int] = None
+    # Set by the caller (the website, which owns accounts/plans -- N8 Speed
+    # has none) from the authenticated user's actual plan. Determines queue
+    # priority only; unrecognized/missing values fall back to "free" rather
+    # than erroring, since getting this wrong costs a user queue position,
+    # not money or safety -- unlike target_faces validation, this isn't
+    # worth a hard 400 over.
+    plan: str = "free"
 
 
 OUTPUT_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -497,7 +524,7 @@ def _run_job(job_id: str):
 
 def worker_loop():
     while True:
-        job_id = job_queue.get()
+        _priority, _seq, job_id = job_queue.get()
         with jobs_lock:
             jobs[job_id]["status"] = "processing"
         try:
@@ -531,8 +558,13 @@ def generate(req: GenerateRequest):
     job_id = str(uuid.uuid4())
     with jobs_lock:
         jobs[job_id] = {"status": "queued", "request": req}
-    job_queue.put(job_id)
+    priority = PLAN_PRIORITY.get(req.plan, PLAN_PRIORITY["free"])
+    job_queue.put((priority, _next_job_seq(), job_id))
 
+    # Approximate: reflects total jobs ahead in the queue, not this job's
+    # exact turn -- a lower-priority job can still get overtaken by a
+    # higher-priority one queued after it. Good enough for a "roughly how
+    # busy is this" message, not worth the complexity of an exact figure.
     position = job_queue.qsize()
     message = (
         "A lot of people are using N8 Speed right now. This might take longer."
