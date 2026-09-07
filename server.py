@@ -312,25 +312,31 @@ def _run_job(job_id: str):
     t0 = time.time()
     mesh = shape_pipeline(
         image=image_nobg,
-        # Raised from 12: with rembg now handling background removal
-        # properly (rather than relying on the prompt suffix alone) and a
-        # ~30s quality budget instead of ~10s, there's room to push detail
-        # further. Not a measured number -- shape_seconds bundles a step-
-        # dependent diffusion cost with a step-independent mesh-extraction
-        # cost that can't be separated from here. Tune against the real
-        # number this logs.
-        num_inference_steps=25,
-        # Lowered back from 384 (Hunyuan3D-2's own default) to 256. 384
-        # isn't just slower on average, it's UNPREDICTABLE: confirmed live
-        # that since we never pin a seed, each SDXL-Turbo image is
-        # different, and Hunyuan3D-2's octree-based adaptive mesh
-        # refinement scales with surface complexity -- one "a cup" call
-        # measured shape_seconds=24.5s, another measured 299.7s (12x) with
-        # no code change, just a harder random shape to refine. 256 was
-        # fast and consistent across every test run (no outliers seen),
-        # trading some mesh detail for an actual time ceiling instead of
-        # an average.
-        octree_resolution=256,
+        # Raised from 25: confirmed live the diffusion loop itself is only
+        # ~2.4s of an ~8s shape_seconds total (logged as "Diffusion
+        # Sampling:: 25/25" completing in ~2s), so step count was never the
+        # dominant cost -- this mainly buys denoising stability, not the
+        # facial-distortion fix below.
+        num_inference_steps=35,
+        # Raised from 256 -- explicitly requested higher quality ("faces
+        # look distorted") at a 1.5x time budget. octree_resolution (marching
+        # cubes voxel grid density), not step count, is what actually
+        # determines whether fine geometry like facial features gets
+        # captured or comes out blobby -- confirmed by where the time
+        # actually goes (see note above).
+        #
+        # NOT going back to 384: confirmed live that setting is UNPREDICTABLE,
+        # not just slower -- since we never pin a seed, each SDXL-Turbo image
+        # is different, and Hunyuan3D-2's octree-based adaptive refinement
+        # scales with surface complexity. One "a cup" call at 384 measured
+        # shape_seconds=24.5s, another measured 299.7s (12x) with no code
+        # change, just a harder random shape. 300 is a deliberately
+        # moderate step up from the fast/consistent 256 baseline, estimated
+        # (from the 256->384 scaling actually observed) to land near 1.5x
+        # average total time -- an estimate, not a guarantee, given the
+        # same variance risk applies at any resolution above 256, just
+        # less severely. Watch real shape_seconds numbers and adjust.
+        octree_resolution=300,
     )[0]
     shape_seconds = time.time() - t0
 

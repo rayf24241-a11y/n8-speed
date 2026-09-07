@@ -188,6 +188,25 @@ few-step distillation family, so it's roughly 2x `shape_seconds` (measured
 ~8s -> expect ~16s), not a speed cliff, and comfortably inside the ~30s
 budget. Falls back to mini-turbo only if the bigger checkpoint is missing.
 
+## octree_resolution 256 -> 300: distorted faces, explicit 1.5x time budget
+
+Reported live: faces were coming out visibly distorted. Confirmed the
+diffusion loop itself is only ~2.4s of an ~8s `shape_seconds` total (logged
+as "Diffusion Sampling:: 25/25" finishing in ~2s) -- step count was never
+the dominant cost or the thing controlling facial detail.
+`octree_resolution` (marching-cubes voxel grid density) is what actually
+determines whether fine geometry like facial features gets captured or
+comes out blobby. Also raised `num_inference_steps` 25 -> 35 for extra
+denoising stability, though that's a secondary lever.
+
+Deliberately did NOT go back to 384 (see the section above -- that
+setting is unpredictable, not just slower, with a confirmed 12x outlier).
+300 is a moderate step up from the fast/consistent 256 baseline, estimated
+from the 256->384 scaling actually observed to land near the requested
+1.5x average total time -- an estimate, not a guarantee, since the same
+variance risk applies at any resolution above 256, just less severely at
+300 than at 384. Watch real `shape_seconds` numbers on deploy.
+
 ## Content safety
 
 Two layers, since a keyword filter on the prompt text can't do anything
