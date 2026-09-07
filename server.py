@@ -108,10 +108,17 @@ def _prompt_is_flagged(prompt: str) -> bool:
 # largest-connected-component mesh cleanup: a chair fused to a seated
 # figure is one connected component, not separable debris. The only real
 # fix is stopping the prop from being generated in the first place.
+#
+# Confirmed live a third time: "a man" generated a legless result -- the
+# "studio product photography, centered" framing biases a PERSON subject
+# toward a head-and-shoulders portrait crop, so the 2D image itself likely
+# never had legs in frame in the first place; the shape model can't
+# reconstruct what it never saw. Added explicit full-body framing language.
 TEXT_TO_IMAGE_STYLE_SUFFIX = (
     ", single isolated object, centered, plain white background, no floor, "
     "no shadow, no ground, studio product photography, clean background, "
-    "no props, no furniture, no accessories, no other objects, nothing else in frame"
+    "no props, no furniture, no accessories, no other objects, nothing else in frame, "
+    "full body, full-length, entire body visible from head to feet"
 )
 
 

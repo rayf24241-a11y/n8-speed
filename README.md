@@ -111,6 +111,23 @@ now also says "no props, no furniture, no accessories, no other objects,
 nothing else in frame". This only helps the text-prompt path (SDXL-Turbo
 image) -- an uploaded photo with a chair in it has no such backstop.
 
+Confirmed live a third time: "a man" generated a legless result. The
+"studio product photography, centered" framing biases a PERSON subject
+toward a head-and-shoulders portrait crop -- the 2D image itself likely
+never had legs in it, so the shape model had nothing to reconstruct. Added
+"full body, full-length, entire body visible from head to feet" to the
+suffix.
+
+**Known limitation, not fixed:** multi-subject prompts like "a girl and a
+man" aren't well supported. `TEXT_TO_IMAGE_STYLE_SUFFIX` says "single
+isolated object" on purpose -- that's the same bias that stops floor/props
+from leaking in -- so a two-person prompt tends to collapse to one figure.
+Even if it didn't, this pipeline reconstructs one image into one mesh with
+no multi-object segmentation, so two people would get welded into a single
+connected 3D blob, not two separate models. There's no good fix for this
+within the current one-image-in/one-mesh-out design -- generate each
+subject as its own separate `/generate` call instead.
+
 Quality settings were also raised: shape `num_inference_steps` 12 -> 25,
 SDXL-Turbo 1 -> 2 steps. `octree_resolution` was raised 256 -> 384 and then
 **reverted back to 256** -- confirmed live that 384 isn't just slower on
