@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import trimesh.smoothing
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from PIL import Image
@@ -220,6 +221,15 @@ def _ai_review_image(image: Image.Image):
 # doesn't eliminate it -- fused hands are a known hard limitation of
 # single-image 3D reconstruction generally, not something a prompt alone
 # fully solves.
+#
+# Reported: animals coming out with duplicated limbs (two tails, five legs).
+# Same underlying cause as fused hands, opposite symptom -- the shape model
+# hallucinating extra geometry instead of merging it, when the 2D reference
+# leaves a limb's depth/count ambiguous (a front-on animal photo, for
+# example, foreshortens and overlaps legs in projection, exactly the kind
+# of ambiguity a monocular reconstruction can resolve the wrong way). Bias
+# toward an angle where limbs don't overlap in the first place, and state
+# the constraint explicitly, same as "not fused" for hands.
 TEXT_TO_IMAGE_STYLE_SUFFIX = (
     ", single isolated object, centered, plain white background, no floor, "
     "no shadow, no ground, studio product photography, clean background, "
@@ -227,6 +237,8 @@ TEXT_TO_IMAGE_STYLE_SUFFIX = (
     "full body, full-length, entire body visible from head to feet, "
     "standing upright, arms relaxed at sides, hands away from each other and away from the body, "
     "hands and fingers clearly separated and distinct, not touching, not overlapping, not fused together, "
+    "side view or three-quarter view showing all limbs distinctly and not overlapping each other, "
+    "anatomically correct with the natural number of limbs and no duplicated or extra legs, arms, or tails, "
     "detailed face, sharp facial features, clear eyes, well-defined face, high detail"
 )
 
@@ -374,6 +386,22 @@ def _sweep_old_outputs():
             pass
 
 
+def _decimate(mesh, face_count: int):
+    # Confirmed live: simplify_quadric_decimation alone leaves visible spike
+    # / sliver artifacts (jagged hair, claw-like fingers) at the reduction
+    # ratios this pipeline actually uses (e.g. ~180k -> 40k, an ~80% cut) --
+    # classic quadric edge-collapse behavior on thin, fine geometry like
+    # fingers and hair strands. Taubin smoothing afterward relaxes those
+    # spikes back down. Taubin, not plain Laplacian: Laplacian smoothing
+    # shrinks the whole mesh toward its centroid over many iterations,
+    # which would visibly shrink/distort the model; Taubin alternates a
+    # shrink and an "unshrink" pass each iteration specifically to avoid
+    # that, so it relaxes local spikiness without changing overall size.
+    mesh = mesh.simplify_quadric_decimation(face_count=face_count)
+    trimesh.smoothing.filter_taubin(mesh, iterations=10)
+    return mesh
+
+
 def _run_job(job_id: str):
     _sweep_old_outputs()
     job = jobs[job_id]
@@ -467,7 +495,7 @@ def _run_job(job_id: str):
     decimate_seconds = 0.0
     if req.target_faces and len(mesh.faces) > req.target_faces:
         t_decimate = time.time()
-        mesh = mesh.simplify_quadric_decimation(face_count=req.target_faces)
+        mesh = _decimate(mesh, req.target_faces)
         decimate_seconds = time.time() - t_decimate
 
     simplify_seconds = 0.0
@@ -491,7 +519,7 @@ def _run_job(job_id: str):
         # fast range regardless of how dense the shape output was.
         t_simplify = time.time()
         if len(mesh.faces) > 40000:
-            mesh = mesh.simplify_quadric_decimation(face_count=40000)
+            mesh = _decimate(mesh, 40000)
         simplify_seconds = time.time() - t_simplify
 
         t1 = time.time()
