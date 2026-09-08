@@ -369,6 +369,15 @@ class GenerateRequest(BaseModel):
     plan: str = "free"
 
 
+class TextureRequest(BaseModel):
+    # For POST /texture/{job_id} -- adds texture to an already-generated
+    # model instead of regenerating it. Same target_faces/plan semantics
+    # as GenerateRequest; no prompt/image_b64 here since the source job's
+    # own reference image is reused, not a new one.
+    target_faces: Optional[int] = None
+    plan: str = "free"
+
+
 OUTPUT_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
@@ -378,12 +387,13 @@ def _sweep_old_outputs():
     # instead of on a separate timer, since the worker thread is already the
     # one serialization point for everything this process does.
     cutoff = time.time() - OUTPUT_MAX_AGE_SECONDS
-    for f in OUTPUT_DIR.glob("*.glb"):
-        try:
-            if f.stat().st_mtime < cutoff:
-                f.unlink()
-        except OSError:
-            pass
+    for pattern in ("*.glb", "*.png"):
+        for f in OUTPUT_DIR.glob(pattern):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
 
 
 def _decimate(mesh, face_count: int):
@@ -400,6 +410,29 @@ def _decimate(mesh, face_count: int):
     mesh = mesh.simplify_quadric_decimation(face_count=face_count)
     trimesh.smoothing.filter_taubin(mesh, iterations=10)
     return mesh
+
+
+def _texture_mesh(mesh, image_nobg, target_faces: Optional[int]):
+    """Shared by a fresh generation and a later /texture call on an
+    existing one -- keeps both paths' decimation-then-paint behavior
+    (including the xatlas-hang safety cap) identical by construction."""
+    decimate_seconds = 0.0
+    if target_faces and len(mesh.faces) > target_faces:
+        t = time.time()
+        mesh = _decimate(mesh, target_faces)
+        decimate_seconds = time.time() - t
+
+    simplify_seconds = 0.0
+    if len(mesh.faces) > 40000:
+        t = time.time()
+        mesh = _decimate(mesh, 40000)
+        simplify_seconds = time.time() - t
+
+    t = time.time()
+    mesh = paint_pipeline(mesh, image=image_nobg)
+    texture_seconds = time.time() - t
+
+    return mesh, decimate_seconds, simplify_seconds, texture_seconds
 
 
 def _run_job(job_id: str):
@@ -488,43 +521,30 @@ def _run_job(job_id: str):
         mesh = max(components, key=lambda m: len(m.vertices))
     cleanup_seconds = time.time() - t_clean
 
-    # User-requested polycount cap. Runs before the texture-only 40k safety
-    # cap below (that one exists purely to keep xatlas fast, not for quality
-    # control) so a request already at or under 40k also speeds up texturing
-    # for free instead of decimating twice.
-    decimate_seconds = 0.0
-    if req.target_faces and len(mesh.faces) > req.target_faces:
-        t_decimate = time.time()
-        mesh = _decimate(mesh, req.target_faces)
-        decimate_seconds = time.time() - t_decimate
+    # Save the undecimated shape + its reference image so a LATER /texture
+    # call (see _run_retexture_job) can add texture to this exact model
+    # instead of the website's only option being to call /generate again --
+    # which redoes everything from a fresh, differently-random reference
+    # image and produces a visibly different model, not the same one
+    # textured. Swept on the same 24h clock as everything else in
+    # _sweep_old_outputs.
+    mesh.export(str(OUTPUT_DIR / f"{job_id}_shape.glb"))
+    image_nobg.save(str(OUTPUT_DIR / f"{job_id}_ref.png"))
 
+    # User-requested polycount cap. For the texture path this is handled
+    # inside _texture_mesh instead (it needs to run before that function's
+    # own 40k xatlas-safety cap, not duplicated here).
+    decimate_seconds = 0.0
     simplify_seconds = 0.0
     texture_seconds = 0.0
     if req.texture:
-        # Confirmed live: the paint pipeline's very first step is
-        # hy3dgen.texgen.utils.uv_warp_utils.mesh_uv_wrap(), which calls
-        # xatlas.parametrize() -- a synchronous, single-threaded C++ call
-        # that prints zero progress and holds the GIL for its entire
-        # duration. UV atlas packing cost scales hard with face count, and
-        # raising octree_resolution to 384 this session produced a dense
-        # enough mesh that this call ran long enough to freeze the whole
-        # process -- including /health -- for 10+ minutes with no error and
-        # no log line, exactly matching the original "hang". Not a checkpoint
-        # issue (turbo vs base share this same code path).
-        #
-        # Fix: decimate before texturing. Texture detail comes from the UV
-        # texture map, not mesh density, so a lower-poly mesh for texturing
-        # than for shape is the standard game/VFX pipeline tradeoff anyway,
-        # not just a workaround. 40k faces is comfortably inside xatlas's
-        # fast range regardless of how dense the shape output was.
-        t_simplify = time.time()
-        if len(mesh.faces) > 40000:
-            mesh = _decimate(mesh, 40000)
-        simplify_seconds = time.time() - t_simplify
-
-        t1 = time.time()
-        mesh = paint_pipeline(mesh, image=image_nobg)
-        texture_seconds = time.time() - t1
+        mesh, decimate_seconds, simplify_seconds, texture_seconds = _texture_mesh(
+            mesh, image_nobg, req.target_faces
+        )
+    elif req.target_faces and len(mesh.faces) > req.target_faces:
+        t_decimate = time.time()
+        mesh = _decimate(mesh, req.target_faces)
+        decimate_seconds = time.time() - t_decimate
 
     t2 = time.time()
     out_path = OUTPUT_DIR / f"{job_id}.glb"
@@ -550,13 +570,63 @@ def _run_job(job_id: str):
         )
 
 
+def _run_retexture_job(job_id: str, source_job_id: str):
+    """Adds texture to an ALREADY-generated model instead of regenerating
+    it -- what /texture/{job_id} queues. Loads the shape + reference image
+    _run_job saved for source_job_id rather than calling txt2img/shape_pipeline
+    again, so the result is the same model, just textured, not a new roll."""
+    _sweep_old_outputs()
+    job = jobs[job_id]
+    req: TextureRequest = job["request"]
+
+    shape_path = OUTPUT_DIR / f"{source_job_id}_shape.glb"
+    ref_path = OUTPUT_DIR / f"{source_job_id}_ref.png"
+    if not shape_path.exists() or not ref_path.exists():
+        raise ValueError(
+            "That model's shape data is no longer available for re-texturing "
+            "(it's kept for the same 24h window as generated downloads, then swept)."
+        )
+
+    mesh = trimesh.load(str(shape_path), force="mesh")
+    image_nobg = Image.open(str(ref_path)).convert("RGB")
+
+    mesh, decimate_seconds, simplify_seconds, texture_seconds = _texture_mesh(
+        mesh, image_nobg, req.target_faces
+    )
+
+    t2 = time.time()
+    out_path = OUTPUT_DIR / f"{job_id}.glb"
+    mesh.export(str(out_path))
+    export_seconds = time.time() - t2
+
+    with jobs_lock:
+        job["status"] = "done"
+        job["result_path"] = str(out_path)
+        job["image_seconds"] = 0.0
+        job["review_seconds"] = 0.0
+        job["rembg_seconds"] = 0.0
+        job["shape_seconds"] = 0.0
+        job["cleanup_seconds"] = 0.0
+        job["decimate_seconds"] = round(decimate_seconds, 2)
+        job["simplify_seconds"] = round(simplify_seconds, 2)
+        job["texture_seconds"] = round(texture_seconds, 2)
+        job["export_seconds"] = round(export_seconds, 2)
+        job["face_count"] = len(mesh.faces)
+        job["total_seconds"] = round(decimate_seconds + simplify_seconds + texture_seconds + export_seconds, 2)
+
+
 def worker_loop():
     while True:
         _priority, _seq, job_id = job_queue.get()
         with jobs_lock:
-            jobs[job_id]["status"] = "processing"
+            job = jobs[job_id]
+            job["status"] = "processing"
+            retexture_of = job.get("retexture_of")
         try:
-            _run_job(job_id)
+            if retexture_of:
+                _run_retexture_job(job_id, retexture_of)
+            else:
+                _run_job(job_id)
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             with jobs_lock:
@@ -600,6 +670,32 @@ def generate(req: GenerateRequest):
         else "Generating..."
     )
     return {"job_id": job_id, "queue_position": position, "message": message}
+
+
+@app.post("/texture/{job_id}", dependencies=[Depends(require_api_key)])
+def texture_existing(job_id: str, req: TextureRequest):
+    with jobs_lock:
+        source = jobs.get(job_id)
+    if not source or source.get("status") != "done":
+        raise HTTPException(404, "Original job not found or not finished")
+    if req.target_faces is not None and not (MIN_TARGET_FACES <= req.target_faces <= MAX_TARGET_FACES):
+        raise HTTPException(
+            400, f"target_faces must be between {MIN_TARGET_FACES} and {MAX_TARGET_FACES}"
+        )
+
+    new_job_id = str(uuid.uuid4())
+    with jobs_lock:
+        jobs[new_job_id] = {"status": "queued", "request": req, "retexture_of": job_id}
+    priority = PLAN_PRIORITY.get(req.plan, PLAN_PRIORITY["free"])
+    job_queue.put((priority, _next_job_seq(), new_job_id))
+
+    position = job_queue.qsize()
+    message = (
+        "A lot of people are using N8 Speed right now. This might take longer."
+        if position > 1
+        else "Adding texture..."
+    )
+    return {"job_id": new_job_id, "queue_position": position, "message": message}
 
 
 @app.get("/status/{job_id}", dependencies=[Depends(require_api_key)])

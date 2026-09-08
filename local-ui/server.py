@@ -23,7 +23,7 @@ from pathlib import Path
 
 # Update this every time you spin up a new pod -- RunPod pod IDs change on
 # every redeploy, so this is the one thing that needs editing between runs.
-N8_SPEED_URL = "https://6x7ydqgjssccay-8000.proxy.runpod.net"
+N8_SPEED_URL = "https://5obe0xoazwjsgu-8000.proxy.runpod.net"
 
 # Must match N8_SPEED_API_KEY set as an env var on the pod itself -- server.py
 # now rejects /generate, /status, /result without this header.

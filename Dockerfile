@@ -7,7 +7,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/app/hf-cache \
     HF_HUB_ENABLE_HF_TRANSFER=0 \
     HF_HUB_DISABLE_XET=1 \
-    TORCH_CUDA_ARCH_LIST="8.6;8.9"
+    TORCH_CUDA_ARCH_LIST="8.6;8.9" \
+    U2NET_HOME=/app/hf-cache/u2net
+
+# U2NET_HOME: confirmed live -- the rembg package (hy3dgen.rembg's
+# BackgroundRemover wraps it) defaults to ~/.u2net, which is NOT on the
+# persistent volume the way HF_HOME is. Every single pod restart was
+# re-downloading its 176MB u2net.onnx model from GitHub releases from
+# scratch, and GitHub's release-asset CDN throughput is inconsistent --
+# one real restart took 7+ minutes on this alone, dropping to under
+# 100KB/s at points, purely from bad luck on an external host neither we
+# nor RunPod control. Redirecting it onto the same persistent volume as
+# everything else means this only ever happens once, not on every restart.
 
 # PIP_BREAK_SYSTEM_PACKAGES: harmless here (Ubuntu 22.04's pip predates the
 # PEP 668 "externally managed" restriction), kept in case that ever changes.
